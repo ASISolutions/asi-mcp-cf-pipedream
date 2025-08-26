@@ -1,32 +1,32 @@
 import { createHmac } from "node:crypto";
 
 export interface Props {
-  sub: string;
-  email: string;
-  name?: string;
-  [key: string]: unknown;
+	sub: string;
+	email: string;
+	name?: string;
+	[key: string]: unknown;
 }
 
 export async function clientIdAlreadyApproved(
-  kv: KVNamespace,
-  clientId: string,
-  cookieKey: string,
+	kv: KVNamespace,
+	clientId: string,
+	cookieKey: string,
 ): Promise<boolean> {
-  try {
-    const stored = await kv.get(`approved:${clientId}`);
-    return stored === "true";
-  } catch {
-    return false;
-  }
+	try {
+		const stored = await kv.get(`approved:${clientId}`);
+		return stored === "true";
+	} catch {
+		return false;
+	}
 }
 
 export function renderApprovalDialog(
-  clientId: string,
-  redirectUri: string,
-  scope: string,
-  state: string,
+	clientId: string,
+	redirectUri: string,
+	scope: string,
+	state: string,
 ): Response {
-  const html = `
+	const html = `
 <!DOCTYPE html>
 <html>
 <head>
@@ -98,126 +98,140 @@ export function renderApprovalDialog(
 </body>
 </html>`;
 
-  return new Response(html, {
-    headers: { "Content-Type": "text/html" },
-  });
+	return new Response(html, {
+		headers: { "Content-Type": "text/html" },
+	});
 }
 
 export async function parseRedirectApproval(
-  kv: KVNamespace,
-  clientId: string,
-  cookieKey: string,
+	kv: KVNamespace,
+	clientId: string,
+	cookieKey: string,
 ): Promise<Response> {
-  // Store approval
-  await kv.put(`approved:${clientId}`, "true", { expirationTtl: 86400 }); // 24 hours
+	// Store approval
+	await kv.put(`approved:${clientId}`, "true", { expirationTtl: 86400 }); // 24 hours
 
-  // Create signed cookie
-  const cookie = signCookie(clientId, cookieKey);
-  
-  const response = new Response("", { status: 302 });
-  response.headers.set("Set-Cookie", `mcp_approved=${cookie}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`);
-  
-  return response;
+	// Create signed cookie
+	const cookie = signCookie(clientId, cookieKey);
+
+	const response = new Response("", { status: 302 });
+	response.headers.set(
+		"Set-Cookie",
+		`mcp_approved=${cookie}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`,
+	);
+
+	return response;
 }
 
 export function getUpstreamAuthorizeUrl(
-  authUrl: string,
-  clientId: string,
-  redirectUri: string,
-  state: string,
+	authUrl: string,
+	clientId: string,
+	redirectUri: string,
+	state: string,
 ): string {
-  const url = new URL(authUrl);
-  url.searchParams.set("client_id", clientId);
-  url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("response_type", "code");
-  url.searchParams.set("state", state);
-  url.searchParams.set("scope", "openid email profile");
-  
-  return url.toString();
+	const url = new URL(authUrl);
+	url.searchParams.set("client_id", clientId);
+	url.searchParams.set("redirect_uri", redirectUri);
+	url.searchParams.set("response_type", "code");
+	url.searchParams.set("state", state);
+	url.searchParams.set("scope", "openid email profile");
+
+	return url.toString();
 }
 
 export async function fetchUpstreamAuthToken(
-  tokenUrl: string,
-  clientId: string,
-  clientSecret: string,
-  code: string,
-  redirectUri: string,
+	tokenUrl: string,
+	clientId: string,
+	clientSecret: string,
+	code: string,
+	redirectUri: string,
 ): Promise<any> {
-  const body = new URLSearchParams({
-    grant_type: "authorization_code",
-    client_id: clientId,
-    client_secret: clientSecret,
-    code: code,
-    redirect_uri: redirectUri,
-  });
+	const body = new URLSearchParams({
+		grant_type: "authorization_code",
+		client_id: clientId,
+		client_secret: clientSecret,
+		code: code,
+		redirect_uri: redirectUri,
+	});
 
-  const response = await fetch(tokenUrl, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: body.toString(),
-  });
+	const response = await fetch(tokenUrl, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/x-www-form-urlencoded",
+		},
+		body: body.toString(),
+	});
 
-  if (!response.ok) {
-    throw new Error(`Token exchange failed: ${response.status}`);
-  }
+	if (!response.ok) {
+		throw new Error(`Token exchange failed: ${response.status}`);
+	}
 
-  return response.json();
+	return response.json();
 }
 
 export async function fetchAccessPublicKey(jwksUrl: string): Promise<any> {
-  const response = await fetch(jwksUrl);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch JWKS: ${response.status}`);
-  }
-  return response.json();
+	const response = await fetch(jwksUrl);
+	if (!response.ok) {
+		throw new Error(`Failed to fetch JWKS: ${response.status}`);
+	}
+	return response.json();
 }
 
-export function parseJWT(token: string): { header: any; payload: any; signature: string } {
-  const parts = token.split(".");
-  if (parts.length !== 3) {
-    throw new Error("Invalid JWT format");
-  }
+export function parseJWT(token: string): {
+	header: any;
+	payload: any;
+	signature: string;
+} {
+	const parts = token.split(".");
+	if (parts.length !== 3) {
+		throw new Error("Invalid JWT format");
+	}
 
-  const header = JSON.parse(atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")));
-  const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
-  
-  return { header, payload, signature: parts[2] };
+	const header = JSON.parse(
+		atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")),
+	);
+	const payload = JSON.parse(
+		atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")),
+	);
+
+	return { header, payload, signature: parts[2] };
 }
 
-export async function verifyToken(token: string, jwksUrl: string): Promise<any> {
-  try {
-    const { payload } = parseJWT(token);
-    
-    // Check expiration
-    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
-      throw new Error("Token expired");
-    }
-    
-    // In a full implementation, you would verify the signature using the JWKS
-    // For now, we'll trust the token since it came from our OAuth flow
-    
-    return payload;
-  } catch (error) {
-    throw new Error(`Token verification failed: ${error}`);
-  }
+export async function verifyToken(
+	token: string,
+	jwksUrl: string,
+): Promise<any> {
+	try {
+		const { payload } = parseJWT(token);
+
+		// Check expiration
+		if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+			throw new Error("Token expired");
+		}
+
+		// In a full implementation, you would verify the signature using the JWKS
+		// For now, we'll trust the token since it came from our OAuth flow
+
+		return payload;
+	} catch (error) {
+		throw new Error(`Token verification failed: ${error}`);
+	}
 }
 
 function signCookie(value: string, key: string): string {
-  const hmac = createHmac("sha256", key);
-  hmac.update(value);
-  const signature = hmac.digest("hex");
-  return `${value}.${signature}`;
+	const hmac = createHmac("sha256", key);
+	hmac.update(value);
+	const signature = hmac.digest("hex");
+	return `${value}.${signature}`;
 }
 
 function escapeHtml(text: string): string {
-  const map: { [key: string]: string } = {
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  };
-  return text.replace(/[&<>"']/g, (m) => map[m]);
+	const map: { [key: string]: string } = {
+		"&": "&amp;",
+		"<": "&lt;",
+		">": "&gt;",
+		'"': "&quot;",
+		"'": "&#39;",
+	};
+	return text.replace(/[&<>"']/g, (m) => map[m]);
 }
