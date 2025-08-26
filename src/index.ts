@@ -168,12 +168,11 @@ function resolveAppFromFullUrl(
 }
 
 // ---- System Apps (direct auth) ----
-type SystemAppAuth =
-	| {
-			type: "api_key_header";
-			header: string;
-			valueEnv: string; // Name of Env field holding the secret
-		};
+type SystemAppAuth = {
+	type: "api_key_header";
+	header: string;
+	valueEnv: string; // Name of Env field holding the secret
+};
 
 interface SystemAppConfigEntry {
 	appSlug: string;
@@ -223,7 +222,7 @@ function buildSystemUrl(inputUrl: string, app: SystemAppConfigEntry): string {
 	// If absolute URL, return as-is. Otherwise, resolve against baseUrl.
 	if (/^https?:\/\//i.test(inputUrl)) return inputUrl;
 	try {
-		const base = app.baseUrl.endsWith("/") ? app.baseUrl : app.baseUrl + "/";
+		const base = app.baseUrl.endsWith("/") ? app.baseUrl : `${app.baseUrl}/`;
 		const rel = inputUrl.startsWith("/") ? inputUrl.slice(1) : inputUrl;
 		return new URL(rel, base).toString();
 	} catch {
@@ -255,8 +254,7 @@ async function directSystemRequest(
 					status: 400,
 					data: {
 						error: "not_allowed_for_system_app",
-						message:
-							`The URL host '${host}' is not allowed for system app '${params.app.appSlug}'.`,
+						message: `The URL host '${host}' is not allowed for system app '${params.app.appSlug}'.`,
 						allowed_domains: params.app.allowedDomains,
 					},
 				};
@@ -306,7 +304,8 @@ async function directSystemRequest(
 			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
 		} else {
 			bodyToSend = JSON.stringify(params.body);
-			if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+			if (!headers["Content-Type"])
+				headers["Content-Type"] = "application/json";
 		}
 	}
 
@@ -565,77 +564,75 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 	}
 
 	async init() {
-			// ---- Helper: GitHub issue creation ----
-			const createGithubIssue = async (
-				title: string,
-				body: string,
-			): Promise<{ html_url?: string; number?: number; error?: string } | undefined> => {
-				const token = this.env.GITHUB_TOKEN;
-				const repo = this.env.GITHUB_REPO;
-				if (!token || !repo) return { error: "GitHub not configured" } as any;
-				const apiBase = this.env.GITHUB_API_BASE || "https://api.github.com";
-				const url = `${apiBase.replace(/\/$/, "")}/repos/${repo}/issues`;
-				const resp = await fetch(url, {
-					method: "POST",
-					headers: {
-						"Authorization": `Bearer ${token}`,
-						"Accept": "application/vnd.github+json",
-						"Content-Type": "application/json",
-						"X-GitHub-Api-Version": "2022-11-28",
-						"User-Agent": "asi-mcp-worker/1.0",
-					},
-					body: JSON.stringify({ title, body }),
-				});
-				if (!resp.ok) {
-					let message = `GitHub error ${resp.status}`;
+		// ---- Helper: GitHub issue creation ----
+		const createGithubIssue = async (
+			title: string,
+			body: string,
+		): Promise<
+			{ html_url?: string; number?: number; error?: string } | undefined
+		> => {
+			const token = this.env.GITHUB_TOKEN;
+			const repo = this.env.GITHUB_REPO;
+			if (!token || !repo) return { error: "GitHub not configured" } as any;
+			const apiBase = this.env.GITHUB_API_BASE || "https://api.github.com";
+			const url = `${apiBase.replace(/\/$/, "")}/repos/${repo}/issues`;
+			const resp = await fetch(url, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					Accept: "application/vnd.github+json",
+					"Content-Type": "application/json",
+					"X-GitHub-Api-Version": "2022-11-28",
+					"User-Agent": "asi-mcp-worker/1.0",
+				},
+				body: JSON.stringify({ title, body }),
+			});
+			if (!resp.ok) {
+				let message = `GitHub error ${resp.status}`;
+				try {
+					const text = await resp.text();
 					try {
-						const text = await resp.text();
-						try {
-							const j: any = JSON.parse(text);
-							message = j?.message || message;
-						} catch {
-							if (text) message = `${message}: ${text.substring(0, 300)}`;
-						}
-					} catch {}
-					return { error: message } as any;
-				}
-				return resp.json();
-			};
+						const j: any = JSON.parse(text);
+						message = j?.message || message;
+					} catch {
+						if (text) message = `${message}: ${text.substring(0, 300)}`;
+					}
+				} catch {}
+				return { error: message } as any;
+			}
+			return resp.json();
+		};
 		// -------- auth_status --------
-		this.server.tool(
-			"auth_status",
-			{},
-			async () => {
-				const external_user_id = this.getExternalUserId();
-				const pdToken = await getPdAccessToken(this.env);
-				const res = await listAccountsForUser(
-					this.env,
-					pdToken,
-					external_user_id,
-					undefined,
-					false,
-				);
+		this.server.tool("auth_status", {}, async () => {
+			const external_user_id = this.getExternalUserId();
+			const pdToken = await getPdAccessToken(this.env);
+			const res = await listAccountsForUser(
+				this.env,
+				pdToken,
+				external_user_id,
+				undefined,
+				false,
+			);
 
-				const data = (res.data || []).map((a) => ({
-					app: a.app?.name_slug,
-					account_id: a.id,
-					healthy: a.healthy,
-					dead: a.dead,
-					expires_at: a.expires_at,
-					last_refreshed_at: a.last_refreshed_at,
-					next_refresh_at: a.next_refresh_at,
-				}));
+			const data = (res.data || []).map((a) => ({
+				app: a.app?.name_slug,
+				account_id: a.id,
+				healthy: a.healthy,
+				dead: a.dead,
+				expires_at: a.expires_at,
+				last_refreshed_at: a.last_refreshed_at,
+				next_refresh_at: a.next_refresh_at,
+			}));
 
-				return {
-					content: [
-						{
-							type: "text",
-							text: JSON.stringify({ external_user_id, accounts: data }),
-						},
-					],
-				};
-			},
-		);
+			return {
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify({ external_user_id, accounts: data }),
+					},
+				],
+			};
+		});
 
 		// -------- auth_connect --------
 		this.server.tool(
@@ -675,13 +672,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				app: z.string().optional(),
 				account_id: z.string().optional(),
 			},
-			async ({
-				app,
-				account_id,
-			}: {
-				app?: string;
-				account_id?: string;
-			}) => {
+			async ({ app, account_id }: { app?: string; account_id?: string }) => {
 				const external_user_id = this.getExternalUserId();
 				const pdToken = await getPdAccessToken(this.env);
 
@@ -705,11 +696,20 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						external_user_id,
 						app,
 					);
-					acctId = listed?.data?.[0]?.id;
+					// Filter accounts to ensure we only get accounts for the specified app
+					const matchingAccounts = (listed?.data || []).filter(
+						(account) => account.app?.name_slug === app,
+					);
+					acctId = matchingAccounts[0]?.id;
 				}
 				if (!acctId) {
 					return {
-						content: [{ type: "text", text: `No account found for app ${app || "(unspecified)"}.` }],
+						content: [
+							{
+								type: "text",
+								text: `No account found for app ${app || "(unspecified)"}.`,
+							},
+						],
 					};
 				}
 				await deleteAccount(this.env, pdToken, acctId);
@@ -730,27 +730,27 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					await this.env.USER_LINKS.delete(`xero-tenant:${external_user_id}`);
 				}
 
-				return { content: [{ type: "text", text: `Disconnected ${resolvedApp || "account"}.` }] };
-			},
-		);
-
-		// -------- auth_apps --------
-		this.server.tool(
-			"auth_apps",
-			{},
-			async () => {
-				const pdToken = await getPdAccessToken(this.env);
-				const index = await fetchProxyEnabledApps(this.env, pdToken);
 				return {
 					content: [
-						{
-							type: "text",
-							text: JSON.stringify(index),
-						},
+						{ type: "text", text: `Disconnected ${resolvedApp || "account"}.` },
 					],
 				};
 			},
 		);
+
+		// -------- auth_apps --------
+		this.server.tool("auth_apps", {}, async () => {
+			const pdToken = await getPdAccessToken(this.env);
+			const index = await fetchProxyEnabledApps(this.env, pdToken);
+			return {
+				content: [
+					{
+						type: "text",
+						text: JSON.stringify(index),
+					},
+				],
+			};
+		});
 
 		// (removed) http_request tool
 
@@ -791,10 +791,11 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					? systemApps.find((e) => e.appSlug === app)
 					: undefined;
 				const isFullUrl = /^https?:\/\//i.test(url);
-				const systemAppByUrl = !systemAppBySlug && isFullUrl
-					? resolveSystemAppFromFullUrl(url, systemApps)
-					: undefined;
-				let selectedSystemApp = systemAppBySlug || systemAppByUrl;
+				const systemAppByUrl =
+					!systemAppBySlug && isFullUrl
+						? resolveSystemAppFromFullUrl(url, systemApps)
+						: undefined;
+				const selectedSystemApp = systemAppBySlug || systemAppByUrl;
 
 				// If explicitly requested system provider, enforce resolution
 				if (provider === "system") {
@@ -817,14 +818,27 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						method,
 						url,
 						headers,
-						body: typeof body === "string" ? (() => { try { return JSON.parse(body); } catch { return body; } })() : body,
+						body:
+							typeof body === "string"
+								? (() => {
+										try {
+											return JSON.parse(body);
+										} catch {
+											return body;
+										}
+									})()
+								: body,
 						app: selectedSystemApp,
 					});
 					return {
 						content: [
 							{
 								type: "text",
-								text: JSON.stringify({ provider: "system", app: selectedSystemApp.appSlug, ...sysResult }),
+								text: JSON.stringify({
+									provider: "system",
+									app: selectedSystemApp.appSlug,
+									...sysResult,
+								}),
 							},
 						],
 					};
@@ -859,14 +873,27 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						method,
 						url,
 						headers,
-						body: typeof body === "string" ? (() => { try { return JSON.parse(body); } catch { return body; } })() : body,
+						body:
+							typeof body === "string"
+								? (() => {
+										try {
+											return JSON.parse(body);
+										} catch {
+											return body;
+										}
+									})()
+								: body,
 						app: selectedSystemApp,
 					});
 					return {
 						content: [
 							{
 								type: "text",
-								text: JSON.stringify({ provider: "system", app: selectedSystemApp.appSlug, ...sysResult }),
+								text: JSON.stringify({
+									provider: "system",
+									app: selectedSystemApp.appSlug,
+									...sysResult,
+								}),
 							},
 						],
 					};
@@ -906,8 +933,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 									supported_apps: supported,
 									action:
 										"Pass the app parameter and a relative path (e.g., '/crm/v3/...'), or use auth.connect to add support.",
-									note:
-										"Tip: Use the send_feedback tool to report unsupported API requests.",
+									note: "Tip: Use the send_feedback tool to report unsupported API requests.",
 								}),
 							},
 						],
@@ -925,7 +951,12 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						resolvedApp,
 						false,
 					);
-					acctId = listed?.data?.[0]?.id;
+					// Filter accounts to ensure we only get accounts for the resolved app
+					// This is defensive programming in case the API doesn't filter properly
+					const matchingAccounts = (listed?.data || []).filter(
+						(account) => account.app?.name_slug === resolvedApp,
+					);
+					acctId = matchingAccounts[0]?.id;
 				}
 				if (!acctId) {
 					pdToken = pdToken || (await getPdAccessToken(this.env));
@@ -973,7 +1004,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				if (
 					result?.status === 400 &&
 					(result as any)?.data?.error?.domain &&
-					String((result as any).data.error.domain).toLowerCase().includes("not allowed")
+					String((result as any).data.error.domain)
+						.toLowerCase()
+						.includes("not allowed")
 				) {
 					let allowed: string[] | undefined;
 					try {
@@ -988,8 +1021,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 								type: "text",
 								text: JSON.stringify({
 									error: "not_allowed_for_app",
-									message:
-										`The URL is not allowed for the selected app. Provide a relative path or target one of the allowed domains for ${resolvedApp}.`,
+									message: `The URL is not allowed for the selected app. Provide a relative path or target one of the allowed domains for ${resolvedApp}.`,
 									app: resolvedApp,
 									account_id: acctId,
 									url,
@@ -1019,10 +1051,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 		this.server.tool(
 			"send_feedback",
 			{
-				title: z
-					.string()
-					.min(4)
-					.max(120),
+				title: z.string().min(4).max(120),
 				message: z.string().min(10).max(4000),
 				context: z
 					.object({
@@ -1033,7 +1062,15 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					})
 					.optional(),
 			},
-			async ({ title, message, context }: { title: string; message: string; context?: any }) => {
+			async ({
+				title,
+				message,
+				context,
+			}: {
+				title: string;
+				message: string;
+				context?: any;
+			}) => {
 				const userId = this.getExternalUserId();
 				const email = this.props?.email || "";
 				const name = this.props?.name || "";
@@ -1050,7 +1087,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				if (context) {
 					bodyLines.push("", "Context:");
 					try {
-						bodyLines.push("```json\n" + JSON.stringify(context, null, 2) + "\n```");
+						bodyLines.push(
+							"```json\n" + JSON.stringify(context, null, 2) + "\n```",
+						);
 					} catch {
 						bodyLines.push("(context not serializable)");
 					}
@@ -1074,7 +1113,11 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					content: [
 						{
 							type: "text",
-							text: JSON.stringify({ ok: true, issue_number: (issue as any).number, issue_url: (issue as any).html_url }),
+							text: JSON.stringify({
+								ok: true,
+								issue_number: (issue as any).number,
+								issue_url: (issue as any).html_url,
+							}),
 						},
 					],
 				};
