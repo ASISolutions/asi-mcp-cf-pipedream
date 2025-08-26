@@ -29,6 +29,12 @@ echo "Setting optional redirect URLs..."
 wrangler secret put CONNECT_SUCCESS_REDIRECT
 wrangler secret put CONNECT_ERROR_REDIRECT
 
+# GitHub Issues (optional)
+echo "Setting GitHub Issues configuration (optional)..."
+wrangler secret put GITHUB_TOKEN
+wrangler secret put GITHUB_REPO
+wrangler secret put GITHUB_API_BASE
+
 echo "All secrets configured!"
 echo ""
 echo "Don't forget to:"

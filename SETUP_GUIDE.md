@@ -65,6 +65,11 @@ PIPEDREAM_ENV              # development | production
 # Optional Connect redirect URLs
 CONNECT_SUCCESS_REDIRECT
 CONNECT_ERROR_REDIRECT
+
+# GitHub Issues (optional, for feedback tool)
+GITHUB_TOKEN            # classic PAT or fine-grained token with repo:issues
+GITHUB_REPO             # e.g. owner/repo
+GITHUB_API_BASE         # optional, for GHE: https://github.myco.com/api/v3
 ```
 
 ### 1.3 Access Policies

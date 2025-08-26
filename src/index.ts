@@ -33,24 +33,16 @@ export interface Env {
 
 	// MCP Durable Object
 	MCP_OBJECT: DurableObjectNamespace;
+
+	// GitHub Issues configuration
+	GITHUB_TOKEN: string; // GitHub Personal Access Token with repo:issues
+	GITHUB_REPO: string; // "owner/repo"
+	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
 }
 
-// ---- Utility: detect app slug from URL hostname ----
-const HOST_TO_APP: Record<string, string> = {
-	"api.hubapi.com": "hubspot",
-	"api.pandadoc.com": "pandadoc",
-	"api.xero.com": "xero",
-};
-function detectAppSlugFromUrl(urlStr: string): string | undefined {
-	const host = new URL(urlStr).hostname.toLowerCase();
-	if (HOST_TO_APP[host]) return HOST_TO_APP[host];
-	// Allow broader matching for HubSpot multi-domains:
-	if (host.endsWith("hubapi.com")) return "hubspot";
-	return undefined;
-}
+// (removed) static host-to-app utility in favor of Pipedream apps index
 
-// Feature flag: disable publishing of the http.request tool (keep code for future use)
-const ENABLE_HTTP_REQUEST_TOOL = false;
+// (removed) http_request tool and feature flag; rely on proxy_request universally
 
 // ---- Dynamic Pipedream Apps cache (for host->app detection) ----
 interface PdAppInfo {
@@ -396,30 +388,7 @@ async function proxyRequest(
 	return { status: resp.status, data };
 }
 
-// ---- Xero tenant helper ----
-async function ensureXeroTenantId(
-	env: Env,
-	external_user_id: string,
-	accessToken: string,
-): Promise<string> {
-	// cache tenant in KV for ~6 hours
-	const cacheKey = `xero-tenant:${external_user_id}`;
-	const cached = await env.USER_LINKS.get(cacheKey);
-	if (cached) return cached;
-
-	const resp = await fetch("https://api.xero.com/connections", {
-		headers: { Authorization: `Bearer ${accessToken}` },
-	});
-	if (!resp.ok) throw new Error(`Xero connections ${resp.status}`);
-	const arr = await resp.json();
-	if (!Array.isArray(arr) || arr.length === 0) {
-		throw new Error("No Xero connections found for this user");
-	}
-	const tenantId = arr[0]?.tenantId;
-	if (!tenantId) throw new Error("Missing tenantId from Xero connections");
-	await env.USER_LINKS.put(cacheKey, tenantId, { expirationTtl: 21600 }); // 6 hours
-	return tenantId;
-}
+// (removed) Xero tenant helper; proxy_request path is now canonical
 
 // ---- MCP Server class ----
 export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
@@ -435,6 +404,36 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 	}
 
 	async init() {
+			// ---- Helper: GitHub issue creation ----
+			const createGithubIssue = async (
+				title: string,
+				body: string,
+			): Promise<{ html_url?: string; number?: number; error?: string } | undefined> => {
+				const token = this.env.GITHUB_TOKEN;
+				const repo = this.env.GITHUB_REPO;
+				if (!token || !repo) return { error: "GitHub not configured" } as any;
+				const apiBase = this.env.GITHUB_API_BASE || "https://api.github.com";
+				const url = `${apiBase.replace(/\/$/, "")}/repos/${repo}/issues`;
+				const resp = await fetch(url, {
+					method: "POST",
+					headers: {
+						"Authorization": `Bearer ${token}`,
+						"Accept": "application/vnd.github+json",
+						"Content-Type": "application/json",
+						"X-GitHub-Api-Version": "2022-11-28",
+					},
+					body: JSON.stringify({ title, body }),
+				});
+				if (!resp.ok) {
+					let message = `GitHub error ${resp.status}`;
+					try {
+						const j: any = await resp.json();
+						message = j?.message || message;
+					} catch {}
+					return { error: message } as any;
+				}
+				return resp.json();
+			};
 		// -------- auth_status --------
 		this.server.tool(
 			"auth_status",
@@ -475,9 +474,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 		this.server.tool(
 			"auth_connect",
 			{
-				app: z.enum(["hubspot", "xero", "pandadoc"]),
+				app: z.string().optional(),
 			},
-			async ({ app }: { app: "hubspot" | "xero" | "pandadoc" }) => {
+			async ({ app }: { app?: string }) => {
 				const external_user_id = this.getExternalUserId();
 				const pdToken = await getPdAccessToken(this.env);
 				const url = await createConnectLink(
@@ -506,18 +505,30 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 		this.server.tool(
 			"auth_disconnect",
 			{
-				app: z.enum(["hubspot", "xero", "pandadoc"]),
+				app: z.string().optional(),
 				account_id: z.string().optional(),
 			},
 			async ({
 				app,
 				account_id,
 			}: {
-				app: "hubspot" | "xero" | "pandadoc";
+				app?: string;
 				account_id?: string;
 			}) => {
 				const external_user_id = this.getExternalUserId();
 				const pdToken = await getPdAccessToken(this.env);
+
+				// Require at least one discriminator to avoid ambiguity across apps
+				if (!account_id && !app) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "Provide either account_id or app to disconnect.",
+							},
+						],
+					};
+				}
 
 				let acctId = account_id;
 				if (!acctId) {
@@ -531,179 +542,50 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				}
 				if (!acctId) {
 					return {
-						content: [{ type: "text", text: `No ${app} account found.` }],
+						content: [{ type: "text", text: `No account found for app ${app || "(unspecified)"}.` }],
 					};
 				}
 				await deleteAccount(this.env, pdToken, acctId);
 
-				// Clean per-app cache
-				if (app === "xero") {
+				// Clean per-app cache (currently only Xero uses tenant cache)
+				let resolvedApp = app;
+				if (!resolvedApp) {
+					try {
+						const detailed: any = await getAccountWithCredentials(
+							this.env,
+							pdToken,
+							acctId,
+						);
+						resolvedApp = detailed?.data?.app?.name_slug;
+					} catch {}
+				}
+				if (resolvedApp === "xero") {
 					await this.env.USER_LINKS.delete(`xero-tenant:${external_user_id}`);
 				}
 
-				return { content: [{ type: "text", text: `Disconnected ${app}.` }] };
+				return { content: [{ type: "text", text: `Disconnected ${resolvedApp || "account"}.` }] };
 			},
 		);
 
-		// -------- http_request (disabled via feature flag) --------
-		if (ENABLE_HTTP_REQUEST_TOOL) {
-			this.server.tool(
-				"http_request",
-				{
-					method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
-					url: z.string().url(),
-					headers: z.record(z.string()).optional(),
-					// body can be omitted, string, or an object (we'll JSON.stringify)
-					body: z.union([z.string(), z.record(z.any())]).optional(),
-				},
-				async ({
-					method,
-					url,
-					headers,
-					body,
-				}: {
-					method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-					url: string;
-					headers?: Record<string, string>;
-					body?: string | Record<string, unknown>;
-				}) => {
-					const external_user_id = this.getExternalUserId();
-					const appSlug = detectAppSlugFromUrl(url);
+		// -------- auth_apps --------
+		this.server.tool(
+			"auth_apps",
+			{},
+			async () => {
+				const pdToken = await getPdAccessToken(this.env);
+				const index = await fetchProxyEnabledApps(this.env, pdToken);
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify(index),
+						},
+					],
+				};
+			},
+		);
 
-					if (!appSlug) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: JSON.stringify({
-										error: "unsupported_destination",
-										message:
-											"This tool currently supports HubSpot (hubapi.com), Xero (api.xero.com), and PandaDoc (api.pandadoc.com).",
-									}),
-								},
-							],
-						};
-					}
-
-					const pdToken = await getPdAccessToken(this.env);
-					const accounts = await listAccountsForUser(
-						this.env,
-						pdToken,
-						external_user_id,
-						appSlug,
-						true,
-					);
-
-					let account = accounts?.data?.[0];
-					if (account && !account.credentials) {
-						try {
-							const detailed: any = await getAccountWithCredentials(
-								this.env,
-								pdToken,
-								account.id,
-							);
-							if (detailed?.data?.credentials) {
-								account = {
-									...account,
-									credentials: detailed.data.credentials,
-								} as any;
-							}
-						} catch {}
-					}
-
-					if (!account || !account.credentials) {
-						// Not connected: return Connect URL
-						const connectUrl = await createConnectLink(
-							this.env,
-							pdToken,
-							external_user_id,
-							appSlug,
-						);
-						return {
-							content: [
-								{
-									type: "text",
-									text: JSON.stringify({
-										requires_auth: true,
-										app: appSlug,
-										connect_url: connectUrl,
-									}),
-								},
-							],
-						};
-					}
-
-					// Extract access token from Pipedream credentials.
-					// (Exact shape can vary per app; most OAuth apps expose `access_token`.)
-					const creds = account.credentials as Record<string, unknown>;
-					const accessToken =
-						(creds?.access_token as string) ||
-						(creds?.token as string) ||
-						(creds?.oauth_access_token as string);
-					if (!accessToken || typeof accessToken !== "string") {
-						throw new Error("Missing access token in Pipedream credentials");
-					}
-
-					// Compose headers
-					const h = new Headers(headers || {});
-					h.set("Authorization", `Bearer ${accessToken}`);
-
-					// Xero special case: add xero-tenant-id unless we're calling /connections
-					if (appSlug === "xero") {
-						const { pathname } = new URL(url);
-						if (!/\/connections\/?$/.test(pathname)) {
-							const tenantId = await ensureXeroTenantId(
-								this.env,
-								external_user_id,
-								accessToken,
-							);
-							if (!h.has("xero-tenant-id")) h.set("xero-tenant-id", tenantId);
-						}
-					}
-
-					// Body handling
-					let fetchBody: BodyInit | undefined;
-					if (typeof body === "string") {
-						fetchBody = body;
-					} else if (body && typeof body === "object") {
-						h.set(
-							"Content-Type",
-							h.get("Content-Type") || "application/json",
-						);
-						fetchBody = JSON.stringify(body);
-					}
-
-					const resp = await fetch(url, { method, headers: h, body: fetchBody });
-
-					// Prepare output (avoid echoing huge headers)
-					const outHeaders: Record<string, string> = {};
-					[...resp.headers.entries()]
-						.slice(0, 24)
-						.forEach(([k, v]) => (outHeaders[k] = v));
-
-					let payload: any;
-					const text = await resp.text();
-					try {
-						payload = JSON.parse(text);
-					} catch {
-						payload = text;
-					}
-
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify({
-									status: resp.status,
-									headers: outHeaders,
-									data: payload,
-								}),
-							},
-						],
-					};
-				},
-			);
-		}
+		// (removed) http_request tool
 
 		// -------- proxy_request --------
 		this.server.tool(
@@ -754,13 +636,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					} catch {}
 				}
 
-				// Fallback: try static host->app mapping
-				if (!resolvedApp && isFullUrl) {
-					try {
-						const fallback = detectAppSlugFromUrl(url);
-						if (fallback) resolvedApp = fallback;
-					} catch {}
-				}
+				// (removed) static host->app fallback; rely on Pipedream index and account lookup
 
 				// If account_id provided but app still unknown, derive app from account details
 				if (!resolvedApp && account_id) {
@@ -893,6 +769,72 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 								account_id: acctId,
 								...result,
 							}),
+						},
+					],
+				};
+			},
+		);
+
+		// -------- feedback_create_issue --------
+		this.server.tool(
+			"feedback_create_issue",
+			{
+				title: z
+					.string()
+					.min(4)
+					.max(120),
+				message: z.string().min(10).max(4000),
+				context: z
+					.object({
+						app: z.string().optional(),
+						url: z.string().optional(),
+						tool: z.string().optional(),
+						payload: z.any().optional(),
+					})
+					.optional(),
+			},
+			async ({ title, message, context }: { title: string; message: string; context?: any }) => {
+				const userId = this.getExternalUserId();
+				const email = this.props?.email || "";
+				const name = this.props?.name || "";
+				const when = new Date().toISOString();
+
+				const bodyLines = [
+					`Reporter: ${name || "(unknown)"} <${email || ""}>`,
+					`User ID: ${userId}`,
+					`When: ${when}`,
+					"",
+					"Message:",
+					"" + message,
+				];
+				if (context) {
+					bodyLines.push("", "Context:");
+					try {
+						bodyLines.push("```json\n" + JSON.stringify(context, null, 2) + "\n```");
+					} catch {
+						bodyLines.push("(context not serializable)");
+					}
+				}
+
+				const issue = await createGithubIssue(title, bodyLines.join("\n"));
+				if (!issue || (issue as any).error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: false,
+									error: (issue as any)?.error || "Unknown error",
+								}),
+							},
+						],
+					};
+				}
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify({ ok: true, issue_number: (issue as any).number, issue_url: (issue as any).html_url }),
 						},
 					],
 				};
