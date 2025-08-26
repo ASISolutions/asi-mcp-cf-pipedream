@@ -1,4 +1,5 @@
 // src/index.ts
+import * as Sentry from "@sentry/cloudflare";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
@@ -41,6 +42,11 @@ export interface Env {
 
 	// System app API keys / secrets
 	GAMMA_API_KEY?: string;
+
+	// Sentry configuration
+	SENTRY_DSN: string;
+	SENTRY_ENV?: string;
+	CF_VERSION_METADATA: { id: string };
 }
 
 // (removed) static host-to-app utility in favor of Pipedream apps index
@@ -563,6 +569,88 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 		return sub;
 	}
 
+	// Helper to sanitize args for Sentry breadcrumbs
+	private sanitizeArgs(args: unknown) {
+		try {
+			const clone = JSON.parse(JSON.stringify(args ?? {}));
+			const scrub = (o: any) => {
+				if (!o || typeof o !== "object") return;
+				for (const k of Object.keys(o)) {
+					if (
+						/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret)/i.test(
+							k,
+						)
+					) {
+						o[k] = "[redacted]";
+					} else {
+						scrub(o[k]);
+					}
+				}
+			};
+			scrub(clone);
+			return clone;
+		} catch {
+			return {};
+		}
+	}
+
+	// Helper to add Sentry instrumentation to a tool handler
+	private withSentryInstrumentation<TArgs>(
+		toolName: string,
+		deriveApp: (args: TArgs) => string | undefined,
+		handler: (args: TArgs) => Promise<{ content: any[] }>,
+	) {
+		return async (args: TArgs) => {
+			const sub = this.props?.sub as string | undefined;
+			const email = (this.props?.email as string | undefined) || undefined;
+			const app = deriveApp(args);
+
+			// Attach user/app to scope for this call
+			Sentry.setUser(email ? { id: sub, email } : { id: sub ?? "unknown" });
+			Sentry.setTag("tool", toolName);
+			if (app) Sentry.setTag("app", app);
+
+			// Breadcrumb with sanitized inputs
+			Sentry.addBreadcrumb({
+				category: "mcp.tool.called",
+				level: "info",
+				data: { tool: toolName, app, args: this.sanitizeArgs(args) },
+			});
+
+			// One transaction-like span per tool call
+			return await Sentry.startSpan(
+				{
+					name: `mcp.tool/${toolName}`,
+					op: "mcp.tool",
+					forceTransaction: true,
+					attributes: {
+						"mcp.user.sub": sub ?? "unknown",
+						...(app ? { "mcp.app": app } : {}),
+					},
+				},
+				async () => {
+					try {
+						const result = await handler(args);
+						return result;
+					} catch (err) {
+						// Propagate a useful error up to the client AND capture it
+						const eventId = Sentry.captureException(err, {
+							tags: { tool: toolName, app },
+						});
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({ error: "internal_error", eventId }),
+								},
+							],
+						};
+					}
+				},
+			);
+		};
+	}
+
 	async init() {
 		// ---- Helper: GitHub issue creation ----
 		const createGithubIssue = async (
@@ -603,36 +691,44 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			return resp.json();
 		};
 		// -------- auth_status --------
-		this.server.tool("auth_status", {}, async () => {
-			const external_user_id = this.getExternalUserId();
-			const pdToken = await getPdAccessToken(this.env);
-			const res = await listAccountsForUser(
-				this.env,
-				pdToken,
-				external_user_id,
-				undefined,
-				false,
-			);
+		this.server.tool(
+			"auth_status",
+			{},
+			this.withSentryInstrumentation(
+				"auth_status",
+				() => undefined, // no single app
+				async () => {
+					const external_user_id = this.getExternalUserId();
+					const pdToken = await getPdAccessToken(this.env);
+					const res = await listAccountsForUser(
+						this.env,
+						pdToken,
+						external_user_id,
+						undefined,
+						false,
+					);
 
-			const data = (res.data || []).map((a) => ({
-				app: a.app?.name_slug,
-				account_id: a.id,
-				healthy: a.healthy,
-				dead: a.dead,
-				expires_at: a.expires_at,
-				last_refreshed_at: a.last_refreshed_at,
-				next_refresh_at: a.next_refresh_at,
-			}));
+					const data = (res.data || []).map((a) => ({
+						app: a.app?.name_slug,
+						account_id: a.id,
+						healthy: a.healthy,
+						dead: a.dead,
+						expires_at: a.expires_at,
+						last_refreshed_at: a.last_refreshed_at,
+						next_refresh_at: a.next_refresh_at,
+					}));
 
-			return {
-				content: [
-					{
-						type: "text",
-						text: JSON.stringify({ external_user_id, accounts: data }),
-					},
-				],
-			};
-		});
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({ external_user_id, accounts: data }),
+							},
+						],
+					};
+				},
+			),
+		);
 
 		// -------- auth_connect --------
 		this.server.tool(
@@ -640,29 +736,33 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			{
 				app: z.string().optional(),
 			},
-			async ({ app }: { app?: string }) => {
-				const external_user_id = this.getExternalUserId();
-				const pdToken = await getPdAccessToken(this.env);
-				const url = await createConnectLink(
-					this.env,
-					pdToken,
-					external_user_id,
-					app,
-				);
-				return {
-					content: [
-						{
-							type: "text",
-							text: JSON.stringify({
-								app,
-								external_user_id,
-								connect_url: url,
-								note: "Open this URL to connect the account.",
-							}),
-						},
-					],
-				};
-			},
+			this.withSentryInstrumentation(
+				"auth_connect",
+				(args) => args.app,
+				async ({ app }: { app?: string }) => {
+					const external_user_id = this.getExternalUserId();
+					const pdToken = await getPdAccessToken(this.env);
+					const url = await createConnectLink(
+						this.env,
+						pdToken,
+						external_user_id,
+						app,
+					);
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									app,
+									external_user_id,
+									connect_url: url,
+									note: "Open this URL to connect the account.",
+								}),
+							},
+						],
+					};
+				},
+			),
 		);
 
 		// -------- auth_disconnect --------
@@ -672,85 +772,100 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				app: z.string().optional(),
 				account_id: z.string().optional(),
 			},
-			async ({ app, account_id }: { app?: string; account_id?: string }) => {
-				const external_user_id = this.getExternalUserId();
-				const pdToken = await getPdAccessToken(this.env);
+			this.withSentryInstrumentation(
+				"auth_disconnect",
+				(args) => args.app,
+				async ({ app, account_id }: { app?: string; account_id?: string }) => {
+					const external_user_id = this.getExternalUserId();
+					const pdToken = await getPdAccessToken(this.env);
 
-				// Require at least one discriminator to avoid ambiguity across apps
-				if (!account_id && !app) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: "Provide either account_id or app to disconnect.",
-							},
-						],
-					};
-				}
+					// Require at least one discriminator to avoid ambiguity across apps
+					if (!account_id && !app) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "Provide either account_id or app to disconnect.",
+								},
+							],
+						};
+					}
 
-				let acctId = account_id;
-				if (!acctId) {
-					const listed = await listAccountsForUser(
-						this.env,
-						pdToken,
-						external_user_id,
-						app,
-					);
-					// Filter accounts to ensure we only get accounts for the specified app
-					const matchingAccounts = (listed?.data || []).filter(
-						(account) => account.app?.name_slug === app,
-					);
-					acctId = matchingAccounts[0]?.id;
-				}
-				if (!acctId) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `No account found for app ${app || "(unspecified)"}.`,
-							},
-						],
-					};
-				}
-				await deleteAccount(this.env, pdToken, acctId);
-
-				// Clean per-app cache (currently only Xero uses tenant cache)
-				let resolvedApp = app;
-				if (!resolvedApp) {
-					try {
-						const detailed: any = await getAccountWithCredentials(
+					let acctId = account_id;
+					if (!acctId) {
+						const listed = await listAccountsForUser(
 							this.env,
 							pdToken,
-							acctId,
+							external_user_id,
+							app,
 						);
-						resolvedApp = detailed?.data?.app?.name_slug;
-					} catch {}
-				}
-				if (resolvedApp === "xero") {
-					await this.env.USER_LINKS.delete(`xero-tenant:${external_user_id}`);
-				}
+						// Filter accounts to ensure we only get accounts for the specified app
+						const matchingAccounts = (listed?.data || []).filter(
+							(account) => account.app?.name_slug === app,
+						);
+						acctId = matchingAccounts[0]?.id;
+					}
+					if (!acctId) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `No account found for app ${app || "(unspecified)"}.`,
+								},
+							],
+						};
+					}
+					await deleteAccount(this.env, pdToken, acctId);
 
-				return {
-					content: [
-						{ type: "text", text: `Disconnected ${resolvedApp || "account"}.` },
-					],
-				};
-			},
+					// Clean per-app cache (currently only Xero uses tenant cache)
+					let resolvedApp = app;
+					if (!resolvedApp) {
+						try {
+							const detailed: any = await getAccountWithCredentials(
+								this.env,
+								pdToken,
+								acctId,
+							);
+							resolvedApp = detailed?.data?.app?.name_slug;
+						} catch {}
+					}
+					if (resolvedApp === "xero") {
+						await this.env.USER_LINKS.delete(`xero-tenant:${external_user_id}`);
+					}
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Disconnected ${resolvedApp || "account"}.`,
+							},
+						],
+					};
+				},
+			),
 		);
 
 		// -------- auth_apps --------
-		this.server.tool("auth_apps", {}, async () => {
-			const pdToken = await getPdAccessToken(this.env);
-			const index = await fetchProxyEnabledApps(this.env, pdToken);
-			return {
-				content: [
-					{
-						type: "text",
-						text: JSON.stringify(index),
-					},
-				],
-			};
-		});
+		this.server.tool(
+			"auth_apps",
+			{},
+			this.withSentryInstrumentation(
+				"auth_apps",
+				() => undefined, // no single app
+				async () => {
+					const pdToken = await getPdAccessToken(this.env);
+					const index = await fetchProxyEnabledApps(this.env, pdToken);
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify(index),
+							},
+						],
+					};
+				},
+			),
+		);
 
 		// (removed) http_request tool
 
@@ -766,285 +881,340 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				app: z.string().optional(),
 				provider: z.enum(["system", "pipedream"]).optional(),
 			},
-			async ({
-				method,
-				url,
-				headers,
-				body,
-				account_id,
-				app,
-				provider,
-			}: {
-				method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-				url: string;
-				headers?: Record<string, string>;
-				body?: string | Record<string, unknown>;
-				account_id?: string;
-				app?: string;
-				provider?: "system" | "pipedream";
-			}) => {
-				const external_user_id = this.getExternalUserId();
+			this.withSentryInstrumentation(
+				"proxy_request",
+				(args) => {
+					// Try to derive app from args.app or detect from URL
+					if (args.app) return args.app;
+					const isFullUrl = /^https?:\/\//i.test(args.url);
+					if (isFullUrl) {
+						try {
+							const host = new URL(args.url).hostname.toLowerCase();
+							// This is a simplified detection - the full logic is in the handler
+							if (host.includes("hubspot")) return "hubspot";
+							if (host.includes("xero")) return "xero";
+							if (host.includes("pandadoc")) return "pandadoc";
+							if (host.includes("gamma")) return "gamma";
+						} catch {}
+					}
+					return undefined;
+				},
+				async ({
+					method,
+					url,
+					headers,
+					body,
+					account_id,
+					app,
+					provider,
+				}: {
+					method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+					url: string;
+					headers?: Record<string, string>;
+					body?: string | Record<string, unknown>;
+					account_id?: string;
+					app?: string;
+					provider?: "system" | "pipedream";
+				}) => {
+					const external_user_id = this.getExternalUserId();
 
-				// System apps resolution
-				const systemApps = getSystemAppsConfig(this.env);
-				const systemAppBySlug = app
-					? systemApps.find((e) => e.appSlug === app)
-					: undefined;
-				const isFullUrl = /^https?:\/\//i.test(url);
-				const systemAppByUrl =
-					!systemAppBySlug && isFullUrl
-						? resolveSystemAppFromFullUrl(url, systemApps)
+					// System apps resolution
+					const systemApps = getSystemAppsConfig(this.env);
+					const systemAppBySlug = app
+						? systemApps.find((e) => e.appSlug === app)
 						: undefined;
-				const selectedSystemApp = systemAppBySlug || systemAppByUrl;
+					const isFullUrl = /^https?:\/\//i.test(url);
+					const systemAppByUrl =
+						!systemAppBySlug && isFullUrl
+							? resolveSystemAppFromFullUrl(url, systemApps)
+							: undefined;
+					const selectedSystemApp = systemAppBySlug || systemAppByUrl;
 
-				// If explicitly requested system provider, enforce resolution
-				if (provider === "system") {
-					if (!selectedSystemApp) {
+					// If explicitly requested system provider, enforce resolution
+					if (provider === "system") {
+						if (!selectedSystemApp) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											error: "system_app_required",
+											message:
+												"Provider set to system, but no matching system app found. Pass app or use a URL matching an allowed domain.",
+											allowed_system_apps: systemApps.map((e) => e.appSlug),
+										}),
+									},
+								],
+							};
+						}
+						const sysResult = await directSystemRequest(this.env, {
+							method,
+							url,
+							headers,
+							body:
+								typeof body === "string"
+									? (() => {
+											try {
+												return JSON.parse(body);
+											} catch {
+												return body;
+											}
+										})()
+									: body,
+							app: selectedSystemApp,
+						});
 						return {
 							content: [
 								{
 									type: "text",
 									text: JSON.stringify({
-										error: "system_app_required",
-										message:
-											"Provider set to system, but no matching system app found. Pass app or use a URL matching an allowed domain.",
-										allowed_system_apps: systemApps.map((e) => e.appSlug),
+										provider: "system",
+										app: selectedSystemApp.appSlug,
+										...sysResult,
 									}),
 								},
 							],
 						};
 					}
-					const sysResult = await directSystemRequest(this.env, {
-						method,
-						url,
-						headers,
-						body:
-							typeof body === "string"
-								? (() => {
-										try {
-											return JSON.parse(body);
-										} catch {
-											return body;
-										}
-									})()
-								: body,
-						app: selectedSystemApp,
-					});
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify({
-									provider: "system",
-									app: selectedSystemApp.appSlug,
-									...sysResult,
-								}),
-							},
-						],
-					};
-				}
 
-				// Lazy-fetch Pipedream token only if needed
-				let pdToken: string | undefined;
+					// Lazy-fetch Pipedream token only if needed
+					let pdToken: string | undefined;
 
-				// Resolve app slug dynamically when possible
-				let resolvedApp = app;
-				if (!resolvedApp && isFullUrl) {
-					try {
-						pdToken = pdToken || (await getPdAccessToken(this.env));
-						const index = await fetchProxyEnabledApps(this.env, pdToken);
-						const { app: detectedApp, dynamic } = resolveAppFromFullUrl(
+					// Resolve app slug dynamically when possible
+					let resolvedApp = app;
+					if (!resolvedApp && isFullUrl) {
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const index = await fetchProxyEnabledApps(this.env, pdToken);
+							const { app: detectedApp, dynamic } = resolveAppFromFullUrl(
+								url,
+								index,
+							);
+							if (detectedApp) resolvedApp = detectedApp;
+							// If app is dynamic and a full URL was provided, convert to relative per docs
+							if (dynamic) {
+								const u = new URL(url);
+								const relative = u.pathname + (u.search || "");
+								url = relative || "/";
+							}
+						} catch {}
+					}
+
+					// Prefer system app if available and no explicit account_id or provider override
+					if (!account_id && !provider && selectedSystemApp) {
+						const sysResult = await directSystemRequest(this.env, {
+							method,
 							url,
-							index,
-						);
-						if (detectedApp) resolvedApp = detectedApp;
-						// If app is dynamic and a full URL was provided, convert to relative per docs
-						if (dynamic) {
-							const u = new URL(url);
-							const relative = u.pathname + (u.search || "");
-							url = relative || "/";
-						}
-					} catch {}
-				}
+							headers,
+							body:
+								typeof body === "string"
+									? (() => {
+											try {
+												return JSON.parse(body);
+											} catch {
+												return body;
+											}
+										})()
+									: body,
+							app: selectedSystemApp,
+						});
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										provider: "system",
+										app: selectedSystemApp.appSlug,
+										...sysResult,
+									}),
+								},
+							],
+						};
+					}
 
-				// Prefer system app if available and no explicit account_id or provider override
-				if (!account_id && !provider && selectedSystemApp) {
-					const sysResult = await directSystemRequest(this.env, {
-						method,
-						url,
-						headers,
-						body:
-							typeof body === "string"
-								? (() => {
-										try {
-											return JSON.parse(body);
-										} catch {
-											return body;
-										}
-									})()
-								: body,
-						app: selectedSystemApp,
-					});
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify({
-									provider: "system",
-									app: selectedSystemApp.appSlug,
-									...sysResult,
-								}),
-							},
-						],
-					};
-				}
+					// If account_id provided but app still unknown, derive app from account details
+					if (!resolvedApp && account_id) {
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const detailed: any = await getAccountWithCredentials(
+								this.env,
+								pdToken,
+								account_id,
+							);
+							const slug = detailed?.data?.app?.name_slug;
+							if (slug) resolvedApp = slug;
+						} catch {}
+					}
 
-				// If account_id provided but app still unknown, derive app from account details
-				if (!resolvedApp && account_id) {
-					try {
+					// If we still can't resolve an app, this destination isn't supported by the proxy
+					if (!resolvedApp) {
+						let supported: string[] = [];
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const index = await fetchProxyEnabledApps(this.env, pdToken);
+							supported = index.map((e) => e.appSlug);
+						} catch {}
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "unsupported_destination",
+										message:
+											"This URL does not map to a supported Pipedream Connect app for this project.",
+										url,
+										supported_apps: supported,
+										action:
+											"Pass the app parameter and a relative path (e.g., '/crm/v3/...'), or use auth.connect to add support.",
+										note: "Tip: Use the send_feedback tool to report unsupported API requests.",
+									}),
+								},
+							],
+						};
+					}
+
+					// Resolve account
+					let acctId = account_id;
+					if (!acctId) {
 						pdToken = pdToken || (await getPdAccessToken(this.env));
-						const detailed: any = await getAccountWithCredentials(
+						const listed = await listAccountsForUser(
 							this.env,
 							pdToken,
-							account_id,
+							external_user_id,
+							resolvedApp,
+							false,
 						);
-						const slug = detailed?.data?.app?.name_slug;
-						if (slug) resolvedApp = slug;
-					} catch {}
-				}
-
-				// If we still can't resolve an app, this destination isn't supported by the proxy
-				if (!resolvedApp) {
-					let supported: string[] = [];
-					try {
-						pdToken = pdToken || (await getPdAccessToken(this.env));
-						const index = await fetchProxyEnabledApps(this.env, pdToken);
-						supported = index.map((e) => e.appSlug);
-					} catch {}
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify({
-									error: "unsupported_destination",
-									message:
-										"This URL does not map to a supported Pipedream Connect app for this project.",
-									url,
-									supported_apps: supported,
-									action:
-										"Pass the app parameter and a relative path (e.g., '/crm/v3/...'), or use auth.connect to add support.",
-									note: "Tip: Use the send_feedback tool to report unsupported API requests.",
-								}),
-							},
-						],
-					};
-				}
-
-				// Resolve account
-				let acctId = account_id;
-				if (!acctId) {
-					pdToken = pdToken || (await getPdAccessToken(this.env));
-					const listed = await listAccountsForUser(
-						this.env,
-						pdToken,
-						external_user_id,
-						resolvedApp,
-						false,
-					);
-					// Filter accounts to ensure we only get accounts for the resolved app
-					// This is defensive programming in case the API doesn't filter properly
-					const matchingAccounts = (listed?.data || []).filter(
-						(account) => account.app?.name_slug === resolvedApp,
-					);
-					acctId = matchingAccounts[0]?.id;
-				}
-				if (!acctId) {
-					pdToken = pdToken || (await getPdAccessToken(this.env));
-					const connectUrl = await createConnectLink(
-						this.env,
-						pdToken,
-						external_user_id,
-						resolvedApp,
-					);
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify({
-									requires_auth: true,
-									app: resolvedApp,
-									connect_url: connectUrl,
-								}),
-							},
-						],
-					};
-				}
-
-				// Prepare body
-				let proxyBody: unknown = body;
-				if (typeof body === "string") {
-					try {
-						proxyBody = JSON.parse(body);
-					} catch {
-						proxyBody = body;
+						// Filter accounts to ensure we only get accounts for the resolved app
+						// This is defensive programming in case the API doesn't filter properly
+						const matchingAccounts = (listed?.data || []).filter(
+							(account) => account.app?.name_slug === resolvedApp,
+						);
+						acctId = matchingAccounts[0]?.id;
 					}
-				}
-
-				pdToken = pdToken || (await getPdAccessToken(this.env));
-				const result = await proxyRequest(this.env, pdToken, {
-					external_user_id,
-					account_id: acctId,
-					method,
-					url,
-					headers,
-					body: proxyBody,
-				});
-
-				// Intercept common mismatch error to provide clearer guidance
-				if (
-					result?.status === 400 &&
-					(result as any)?.data?.error?.domain &&
-					String((result as any).data.error.domain)
-						.toLowerCase()
-						.includes("not allowed")
-				) {
-					let allowed: string[] | undefined;
-					try {
+					if (!acctId) {
 						pdToken = pdToken || (await getPdAccessToken(this.env));
-						const index = await fetchProxyEnabledApps(this.env, pdToken);
-						const entry = index.find((e) => e.appSlug === resolvedApp);
-						allowed = entry?.allowedDomains;
-					} catch {}
+						const connectUrl = await createConnectLink(
+							this.env,
+							pdToken,
+							external_user_id,
+							resolvedApp,
+						);
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										requires_auth: true,
+										app: resolvedApp,
+										connect_url: connectUrl,
+									}),
+								},
+							],
+						};
+					}
+
+					// Prepare body
+					let proxyBody: unknown = body;
+					if (typeof body === "string") {
+						try {
+							proxyBody = JSON.parse(body);
+						} catch {
+							proxyBody = body;
+						}
+					}
+
+					pdToken = pdToken || (await getPdAccessToken(this.env));
+
+					// Add nested span for the actual HTTP request
+					const result = await Sentry.startSpan(
+						{
+							name: "mcp.proxy.request",
+							op: "http.client",
+							attributes: {
+								"http.method": method,
+								"http.url": new URL(url, "https://example.com").origin, // avoid path params in spans
+								"dest.host": isFullUrl
+									? new URL(url).hostname
+									: "api.pipedream.com",
+								"mcp.app": resolvedApp ?? "unknown",
+							},
+						},
+						async () => {
+							const resp = await proxyRequest(this.env, pdToken!, {
+								external_user_id,
+								account_id: acctId,
+								method,
+								url,
+								headers,
+								body: proxyBody,
+							});
+
+							// Add breadcrumb with response info
+							Sentry.addBreadcrumb({
+								category: "mcp.proxy.response",
+								level:
+									resp.status >= 500
+										? "error"
+										: resp.status >= 400
+											? "warning"
+											: "info",
+								data: {
+									status: resp.status,
+									app: resolvedApp,
+									host: isFullUrl ? new URL(url).hostname : "api.pipedream.com",
+								},
+							});
+
+							return resp;
+						},
+					);
+
+					// Intercept common mismatch error to provide clearer guidance
+					if (
+						result?.status === 400 &&
+						(result as any)?.data?.error?.domain &&
+						String((result as any).data.error.domain)
+							.toLowerCase()
+							.includes("not allowed")
+					) {
+						let allowed: string[] | undefined;
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const index = await fetchProxyEnabledApps(this.env, pdToken);
+							const entry = index.find((e) => e.appSlug === resolvedApp);
+							allowed = entry?.allowedDomains;
+						} catch {}
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "not_allowed_for_app",
+										message: `The URL is not allowed for the selected app. Provide a relative path or target one of the allowed domains for ${resolvedApp}.`,
+										app: resolvedApp,
+										account_id: acctId,
+										url,
+										allowed_domains: allowed,
+									}),
+								},
+							],
+						};
+					}
+
 					return {
 						content: [
 							{
 								type: "text",
 								text: JSON.stringify({
-									error: "not_allowed_for_app",
-									message: `The URL is not allowed for the selected app. Provide a relative path or target one of the allowed domains for ${resolvedApp}.`,
 									app: resolvedApp,
 									account_id: acctId,
-									url,
-									allowed_domains: allowed,
+									...result,
 								}),
 							},
 						],
 					};
-				}
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: JSON.stringify({
-								app: resolvedApp,
-								account_id: acctId,
-								...result,
-							}),
-						},
-					],
-				};
-			},
+				},
+			),
 		);
 
 		// -------- send_feedback --------
@@ -1062,73 +1232,99 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					})
 					.optional(),
 			},
-			async ({
-				title,
-				message,
-				context,
-			}: {
-				title: string;
-				message: string;
-				context?: any;
-			}) => {
-				const userId = this.getExternalUserId();
-				const email = this.props?.email || "";
-				const name = this.props?.name || "";
-				const when = new Date().toISOString();
+			this.withSentryInstrumentation(
+				"send_feedback",
+				(args) => args.context?.app,
+				async ({
+					title,
+					message,
+					context,
+				}: {
+					title: string;
+					message: string;
+					context?: any;
+				}) => {
+					const userId = this.getExternalUserId();
+					const email = this.props?.email || "";
+					const name = this.props?.name || "";
+					const when = new Date().toISOString();
 
-				const bodyLines = [
-					`Reporter: ${name || "(unknown)"} <${email || ""}>`,
-					`User ID: ${userId}`,
-					`When: ${when}`,
-					"",
-					"Message:",
-					"" + message,
-				];
-				if (context) {
-					bodyLines.push("", "Context:");
-					try {
-						bodyLines.push(
-							"```json\n" + JSON.stringify(context, null, 2) + "\n```",
-						);
-					} catch {
-						bodyLines.push("(context not serializable)");
+					const bodyLines = [
+						`Reporter: ${name || "(unknown)"} <${email || ""}>`,
+						`User ID: ${userId}`,
+						`When: ${when}`,
+						"",
+						"Message:",
+						"" + message,
+					];
+					if (context) {
+						bodyLines.push("", "Context:");
+						try {
+							bodyLines.push(
+								"```json\n" + JSON.stringify(context, null, 2) + "\n```",
+							);
+						} catch {
+							bodyLines.push("(context not serializable)");
+						}
 					}
-				}
 
-				const issue = await createGithubIssue(title, bodyLines.join("\n"));
-				if (!issue || (issue as any).error) {
+					const issue = await createGithubIssue(title, bodyLines.join("\n"));
+					if (!issue || (issue as any).error) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										error: (issue as any)?.error || "Unknown error",
+									}),
+								},
+							],
+						};
+					}
 					return {
 						content: [
 							{
 								type: "text",
 								text: JSON.stringify({
-									ok: false,
-									error: (issue as any)?.error || "Unknown error",
+									ok: true,
+									issue_number: (issue as any).number,
+									issue_url: (issue as any).html_url,
 								}),
 							},
 						],
 					};
-				}
-				return {
-					content: [
-						{
-							type: "text",
-							text: JSON.stringify({
-								ok: true,
-								issue_number: (issue as any).number,
-								issue_url: (issue as any).html_url,
-							}),
-						},
-					],
-				};
-			},
+				},
+			),
 		);
 	}
 }
 
-// Export the OAuth Provider as the Worker entrypoint.
-// This protects the MCP APIs behind OAuth, using Cloudflare Access as SSO at /authorize.
-export default new OAuthProvider({
+// Helper to redact secrets from any Sentry payload
+function scrubEvent(event: Sentry.Event): Sentry.Event {
+	const redact = (obj: any) => {
+		if (!obj || typeof obj !== "object") return;
+		for (const k of Object.keys(obj)) {
+			if (
+				/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret)/i.test(
+					k,
+				)
+			) {
+				obj[k] = "[redacted]";
+			} else {
+				redact(obj[k]);
+			}
+		}
+	};
+	redact((event as any).request);
+	redact(event.contexts);
+	redact(event.extra);
+	redact((event as any).breadcrumbs);
+	return event;
+}
+
+// Create the OAuth Provider instance
+const provider = new OAuthProvider({
 	// Protect both the HTTP and SSE MCP endpoints
 	apiHandlers: {
 		"/mcp": ASIConnectMCP.serve("/mcp") as any,
@@ -1142,3 +1338,24 @@ export default new OAuthProvider({
 	clientRegistrationEndpoint: "/register",
 	scopesSupported: ["openid", "email", "profile"],
 });
+
+// Export the OAuth Provider wrapped with Sentry
+export default Sentry.withSentry(
+	(env: Env) => {
+		const { id: versionId } = env.CF_VERSION_METADATA || { id: "dev" };
+		return {
+			dsn: env.SENTRY_DSN,
+			environment: env.SENTRY_ENV ?? env.PIPEDREAM_ENV,
+			release: versionId,
+			// capture headers/IP (you can set this false if you prefer)
+			sendDefaultPii: true,
+			// Logs: forwards console.* to Sentry Logs
+			enableLogs: true,
+			// Tracing: 100% since volume is low (tune later)
+			tracesSampleRate: 1.0,
+			// Belt & suspenders token-scrubber
+			beforeSend: scrubEvent as any,
+		};
+	},
+	provider as unknown as ExportedHandler<Env>,
+);
