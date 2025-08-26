@@ -1,6 +1,6 @@
 // src/index.ts
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import AccessDefaultHandler from "./access-handler";
@@ -599,10 +599,43 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					} catch {}
 					return { error: message } as any;
 				}
-				return resp.json();
-			};
-		// -------- auth_status --------
-		this.server.tool(
+                                return resp.json();
+                        };
+                // -------- dummy_resource --------
+                this.server.registerResource(
+                        "dummy-resource",
+                        new ResourceTemplate("dummy://{name}", { list: undefined }),
+                        {
+                                title: "Dummy Resource",
+                                description: "Returns placeholder text for a name",
+                        },
+                        async (uri, { name }) => ({
+                                contents: [
+                                        { uri: uri.href, text: `Hello, ${name}! This is dummy content.` },
+                                ],
+                        }),
+                );
+
+                // -------- dummy_prompt --------
+                this.server.registerPrompt(
+                        "dummy-prompt",
+                        {
+                                title: "Dummy Prompt",
+                                description: "Generates placeholder messages",
+                                argsSchema: {
+                                        topic: z.string(),
+                                },
+                        },
+                        ({ topic }) => ({
+                                messages: [
+                                        { role: "system", content: { type: "text", text: "You are a dummy assistant." } },
+                                        { role: "user", content: { type: "text", text: `Discuss ${topic}.` } },
+                                ],
+                        }),
+                );
+
+                // -------- auth_status --------
+                this.server.tool(
 			"auth_status",
 			{},
 			async () => {
