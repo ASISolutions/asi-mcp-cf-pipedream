@@ -1,0 +1,26 @@
+---
+alwaysApply: true
+---
+# Project Structure Guide
+
+- Entrypoint Worker: [src/index.ts](mdc:src/index.ts)
+  - Exports an `OAuthProvider` that protects API routes and wires the MCP server.
+  - MCP routes: `"/mcp"` (HTTP) and `"/sse"` (SSE) via `ASIConnectMCP.serve()` / `serveSSE()`.
+  - Registers MCP tools: `auth.status`, `auth.connect`, `auth.disconnect`, `http.request`, `proxy.request`.
+- Access default handler: [src/access-handler.ts](mdc:src/access-handler.ts)
+  - Implements `/authorize` UI + flow using Cloudflare Access (Access for SaaS), then calls `env.OAUTH_PROVIDER.completeAuthorization()`.
+- OAuth helpers: [src/workers-oauth-utils.ts](mdc:src/workers-oauth-utils.ts)
+  - Utilities for parsing/verifying tokens and rendering minimal approval UI used earlier.
+- Configuration:
+  - Worker config: [wrangler.jsonc](mdc:wrangler.jsonc)
+  - TypeScript config: [tsconfig.json](mdc:tsconfig.json)
+  - Biome config: [biome.json](mdc:biome.json)
+- Docs & setup:
+  - Setup guide: [SETUP_GUIDE.md](mdc:SETUP_GUIDE.md)
+  - README: [README.md](mdc:README.md)
+
+Environment bindings (see `Env` in [src/index.ts](mdc:src/index.ts)):
+- KV: `OAUTH_KV`, `USER_LINKS`
+- Durable Object: `MCP_OBJECT`
+- Cloudflare Access: `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_AUTHORIZATION_URL`, `ACCESS_TOKEN_URL`, `ACCESS_JWKS_URL`, `COOKIE_ENCRYPTION_KEY`
+- Pipedream Connect: `PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET`, `PIPEDREAM_PROJECT_ID`, `PIPEDREAM_ENV`
