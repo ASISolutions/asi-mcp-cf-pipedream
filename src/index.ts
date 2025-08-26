@@ -435,9 +435,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 	}
 
 	async init() {
-		// -------- auth.status --------
+		// -------- auth_status --------
 		this.server.tool(
-			"auth.status",
+			"auth_status",
 			{},
 			async () => {
 				const external_user_id = this.getExternalUserId();
@@ -471,9 +471,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			},
 		);
 
-		// -------- auth.connect --------
+		// -------- auth_connect --------
 		this.server.tool(
-			"auth.connect",
+			"auth_connect",
 			{
 				app: z.enum(["hubspot", "xero", "pandadoc"]),
 			},
@@ -502,9 +502,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			},
 		);
 
-		// -------- auth.disconnect --------
+		// -------- auth_disconnect --------
 		this.server.tool(
-			"auth.disconnect",
+			"auth_disconnect",
 			{
 				app: z.enum(["hubspot", "xero", "pandadoc"]),
 				account_id: z.string().optional(),
@@ -545,10 +545,10 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			},
 		);
 
-		// -------- http.request (disabled via feature flag) --------
+		// -------- http_request (disabled via feature flag) --------
 		if (ENABLE_HTTP_REQUEST_TOOL) {
 			this.server.tool(
-				"http.request",
+				"http_request",
 				{
 					method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
 					url: z.string().url(),
@@ -705,9 +705,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			);
 		}
 
-		// -------- proxy.request --------
+		// -------- proxy_request --------
 		this.server.tool(
-			"proxy.request",
+			"proxy_request",
 			{
 				method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
 				url: z.string(),
