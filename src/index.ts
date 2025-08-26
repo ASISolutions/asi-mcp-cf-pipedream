@@ -754,6 +754,54 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					} catch {}
 				}
 
+				// Fallback: try static host->app mapping
+				if (!resolvedApp && isFullUrl) {
+					try {
+						const fallback = detectAppSlugFromUrl(url);
+						if (fallback) resolvedApp = fallback;
+					} catch {}
+				}
+
+				// If account_id provided but app still unknown, derive app from account details
+				if (!resolvedApp && account_id) {
+					try {
+						const detailed: any = await getAccountWithCredentials(
+							this.env,
+							pdToken,
+							account_id,
+						);
+						const slug = detailed?.data?.app?.name_slug;
+						if (slug) resolvedApp = slug;
+					} catch {}
+				}
+
+				// If we still can't resolve an app, this destination isn't supported by the proxy
+				if (!resolvedApp) {
+					let supported: string[] = [];
+					try {
+						const index = await fetchProxyEnabledApps(this.env, pdToken);
+						supported = index.map((e) => e.appSlug);
+					} catch {}
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									error: "unsupported_destination",
+									message:
+										"This URL does not map to a supported Pipedream Connect app for this project.",
+									url,
+									supported_apps: supported,
+									action:
+										"Pass the app parameter and a relative path (e.g., '/crm/v3/...'), or use auth.connect to add support.",
+									note:
+										"TODO: Implement feedback tool to capture unsupported API requests.",
+								}),
+							},
+						],
+					};
+				}
+
 				// Resolve account
 				let acctId = account_id;
 				if (!acctId) {
@@ -806,11 +854,45 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					body: proxyBody,
 				});
 
+				// Intercept common mismatch error to provide clearer guidance
+				if (
+					result?.status === 400 &&
+					(result as any)?.data?.error?.domain &&
+					String((result as any).data.error.domain).toLowerCase().includes("not allowed")
+				) {
+					let allowed: string[] | undefined;
+					try {
+						const index = await fetchProxyEnabledApps(this.env, pdToken);
+						const entry = index.find((e) => e.appSlug === resolvedApp);
+						allowed = entry?.allowedDomains;
+					} catch {}
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									error: "not_allowed_for_app",
+									message:
+										`The URL is not allowed for the selected app. Provide a relative path or target one of the allowed domains for ${resolvedApp}.`,
+									app: resolvedApp,
+									account_id: acctId,
+									url,
+									allowed_domains: allowed,
+								}),
+							},
+						],
+					};
+				}
+
 				return {
 					content: [
 						{
 							type: "text",
-							text: JSON.stringify(result),
+							text: JSON.stringify({
+								app: resolvedApp,
+								account_id: acctId,
+								...result,
+							}),
 						},
 					],
 				};
