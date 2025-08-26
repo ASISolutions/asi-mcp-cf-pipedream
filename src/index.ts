@@ -435,10 +435,8 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 		// -------- auth.status --------
 		this.server.tool(
 			"auth.status",
-			{
-				apps: z.array(z.enum(["hubspot", "xero", "pandadoc"])).optional(),
-			},
-			async ({ apps }: { apps?: ("hubspot" | "xero" | "pandadoc")[] }) => {
+			{},
+			async () => {
 				const external_user_id = this.getExternalUserId();
 				const pdToken = await getPdAccessToken(this.env);
 				const res = await listAccountsForUser(
@@ -449,18 +447,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					false,
 				);
 
-				const filter = (data: NonNullable<typeof res.data>) =>
-					apps
-						? data.filter(
-								(a) =>
-									a.app?.name_slug &&
-									apps.includes(
-										a.app.name_slug as "hubspot" | "xero" | "pandadoc",
-									),
-							)
-						: data;
-
-				const data = filter(res.data || []).map((a) => ({
+				const data = (res.data || []).map((a) => ({
 					app: a.app?.name_slug,
 					account_id: a.id,
 					healthy: a.healthy,
