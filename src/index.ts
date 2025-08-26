@@ -49,6 +49,9 @@ function detectAppSlugFromUrl(urlStr: string): string | undefined {
 	return undefined;
 }
 
+// Feature flag: disable publishing of the http.request tool (keep code for future use)
+const ENABLE_HTTP_REQUEST_TOOL = false;
+
 // ---- Dynamic Pipedream Apps cache (for host->app detection) ----
 interface PdAppInfo {
 	name_slug: string;
@@ -542,160 +545,165 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			},
 		);
 
-		// -------- http.request --------
-		this.server.tool(
-			"http.request",
-			{
-				method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
-				url: z.string().url(),
-				headers: z.record(z.string()).optional(),
-				// body can be omitted, string, or an object (we'll JSON.stringify)
-				body: z.union([z.string(), z.record(z.any())]).optional(),
-			},
-			async ({
-				method,
-				url,
-				headers,
-				body,
-			}: {
-				method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
-				url: string;
-				headers?: Record<string, string>;
-				body?: string | Record<string, unknown>;
-			}) => {
-				const external_user_id = this.getExternalUserId();
-				const appSlug = detectAppSlugFromUrl(url);
+		// -------- http.request (disabled via feature flag) --------
+		if (ENABLE_HTTP_REQUEST_TOOL) {
+			this.server.tool(
+				"http.request",
+				{
+					method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
+					url: z.string().url(),
+					headers: z.record(z.string()).optional(),
+					// body can be omitted, string, or an object (we'll JSON.stringify)
+					body: z.union([z.string(), z.record(z.any())]).optional(),
+				},
+				async ({
+					method,
+					url,
+					headers,
+					body,
+				}: {
+					method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+					url: string;
+					headers?: Record<string, string>;
+					body?: string | Record<string, unknown>;
+				}) => {
+					const external_user_id = this.getExternalUserId();
+					const appSlug = detectAppSlugFromUrl(url);
 
-				if (!appSlug) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: JSON.stringify({
-									error: "unsupported_destination",
-									message:
-										"This tool currently supports HubSpot (hubapi.com), Xero (api.xero.com), and PandaDoc (api.pandadoc.com).",
-								}),
-							},
-						],
-					};
-				}
+					if (!appSlug) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "unsupported_destination",
+										message:
+											"This tool currently supports HubSpot (hubapi.com), Xero (api.xero.com), and PandaDoc (api.pandadoc.com).",
+									}),
+								},
+							],
+						};
+					}
 
-				const pdToken = await getPdAccessToken(this.env);
-				const accounts = await listAccountsForUser(
-					this.env,
-					pdToken,
-					external_user_id,
-					appSlug,
-					true,
-				);
-
-				let account = accounts?.data?.[0];
-				if (account && !account.credentials) {
-					try {
-						const detailed: any = await getAccountWithCredentials(
-							this.env,
-							pdToken,
-							account.id,
-						);
-						if (detailed?.data?.credentials) {
-							account = {
-								...account,
-								credentials: detailed.data.credentials,
-							} as any;
-						}
-					} catch {}
-				}
-
-				if (!account || !account.credentials) {
-					// Not connected: return Connect URL
-					const connectUrl = await createConnectLink(
+					const pdToken = await getPdAccessToken(this.env);
+					const accounts = await listAccountsForUser(
 						this.env,
 						pdToken,
 						external_user_id,
 						appSlug,
+						true,
 					);
+
+					let account = accounts?.data?.[0];
+					if (account && !account.credentials) {
+						try {
+							const detailed: any = await getAccountWithCredentials(
+								this.env,
+								pdToken,
+								account.id,
+							);
+							if (detailed?.data?.credentials) {
+								account = {
+									...account,
+									credentials: detailed.data.credentials,
+								} as any;
+							}
+						} catch {}
+					}
+
+					if (!account || !account.credentials) {
+						// Not connected: return Connect URL
+						const connectUrl = await createConnectLink(
+							this.env,
+							pdToken,
+							external_user_id,
+							appSlug,
+						);
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										requires_auth: true,
+										app: appSlug,
+										connect_url: connectUrl,
+									}),
+								},
+							],
+						};
+					}
+
+					// Extract access token from Pipedream credentials.
+					// (Exact shape can vary per app; most OAuth apps expose `access_token`.)
+					const creds = account.credentials as Record<string, unknown>;
+					const accessToken =
+						(creds?.access_token as string) ||
+						(creds?.token as string) ||
+						(creds?.oauth_access_token as string);
+					if (!accessToken || typeof accessToken !== "string") {
+						throw new Error("Missing access token in Pipedream credentials");
+					}
+
+					// Compose headers
+					const h = new Headers(headers || {});
+					h.set("Authorization", `Bearer ${accessToken}`);
+
+					// Xero special case: add xero-tenant-id unless we're calling /connections
+					if (appSlug === "xero") {
+						const { pathname } = new URL(url);
+						if (!/\/connections\/?$/.test(pathname)) {
+							const tenantId = await ensureXeroTenantId(
+								this.env,
+								external_user_id,
+								accessToken,
+							);
+							if (!h.has("xero-tenant-id")) h.set("xero-tenant-id", tenantId);
+						}
+					}
+
+					// Body handling
+					let fetchBody: BodyInit | undefined;
+					if (typeof body === "string") {
+						fetchBody = body;
+					} else if (body && typeof body === "object") {
+						h.set(
+							"Content-Type",
+							h.get("Content-Type") || "application/json",
+						);
+						fetchBody = JSON.stringify(body);
+					}
+
+					const resp = await fetch(url, { method, headers: h, body: fetchBody });
+
+					// Prepare output (avoid echoing huge headers)
+					const outHeaders: Record<string, string> = {};
+					[...resp.headers.entries()]
+						.slice(0, 24)
+						.forEach(([k, v]) => (outHeaders[k] = v));
+
+					let payload: any;
+					const text = await resp.text();
+					try {
+						payload = JSON.parse(text);
+					} catch {
+						payload = text;
+					}
+
 					return {
 						content: [
 							{
 								type: "text",
 								text: JSON.stringify({
-									requires_auth: true,
-									app: appSlug,
-									connect_url: connectUrl,
+									status: resp.status,
+									headers: outHeaders,
+									data: payload,
 								}),
 							},
 						],
 					};
-				}
-
-				// Extract access token from Pipedream credentials.
-				// (Exact shape can vary per app; most OAuth apps expose `access_token`.)
-				const creds = account.credentials as Record<string, unknown>;
-				const accessToken =
-					(creds?.access_token as string) ||
-					(creds?.token as string) ||
-					(creds?.oauth_access_token as string);
-				if (!accessToken || typeof accessToken !== "string") {
-					throw new Error("Missing access token in Pipedream credentials");
-				}
-
-				// Compose headers
-				const h = new Headers(headers || {});
-				h.set("Authorization", `Bearer ${accessToken}`);
-
-				// Xero special case: add xero-tenant-id unless we're calling /connections
-				if (appSlug === "xero") {
-					const { pathname } = new URL(url);
-					if (!/\/connections\/?$/.test(pathname)) {
-						const tenantId = await ensureXeroTenantId(
-							this.env,
-							external_user_id,
-							accessToken,
-						);
-						if (!h.has("xero-tenant-id")) h.set("xero-tenant-id", tenantId);
-					}
-				}
-
-				// Body handling
-				let fetchBody: BodyInit | undefined ;
-				if (typeof body === "string") {
-					fetchBody = body;
-				} else if (body && typeof body === "object") {
-					h.set("Content-Type", h.get("Content-Type") || "application/json");
-					fetchBody = JSON.stringify(body);
-				}
-
-				const resp = await fetch(url, { method, headers: h, body: fetchBody });
-
-				// Prepare output (avoid echoing huge headers)
-				const outHeaders: Record<string, string> = {};
-				[...resp.headers.entries()]
-					.slice(0, 24)
-					.forEach(([k, v]) => (outHeaders[k] = v));
-
-				let payload: any;
-				const text = await resp.text();
-				try {
-					payload = JSON.parse(text);
-				} catch {
-					payload = text;
-				}
-
-				return {
-					content: [
-						{
-							type: "text",
-							text: JSON.stringify({
-								status: resp.status,
-								headers: outHeaders,
-								data: payload,
-							}),
-						},
-					],
-				};
-			},
-		);
+				},
+			);
+		}
 
 		// -------- proxy.request --------
 		this.server.tool(
