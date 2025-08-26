@@ -38,6 +38,9 @@ export interface Env {
 	GITHUB_TOKEN: string; // GitHub Personal Access Token with repo:issues
 	GITHUB_REPO: string; // "owner/repo"
 	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
+
+	// System app API keys / secrets
+	GAMMA_API_KEY?: string;
 }
 
 // (removed) static host-to-app utility in favor of Pipedream apps index
@@ -162,6 +165,164 @@ function resolveAppFromFullUrl(
 		}
 	}
 	return best ? { app: best.appSlug, dynamic: best.isDynamic } : {};
+}
+
+// ---- System Apps (direct auth) ----
+type SystemAppAuth =
+	| {
+			type: "api_key_header";
+			header: string;
+			valueEnv: string; // Name of Env field holding the secret
+		};
+
+interface SystemAppConfigEntry {
+	appSlug: string;
+	allowedDomains: string[]; // hostnames allowed for absolute URLs
+	baseUrl: string; // base origin for relative paths (e.g., https://api.example.com/v1)
+	auth: SystemAppAuth;
+	defaultHeaders?: Record<string, string>;
+}
+
+type SystemAppsConfig = SystemAppConfigEntry[];
+
+function getSystemAppsConfig(env: Env): SystemAppsConfig {
+	// Initial system apps are hard-coded. This can be extended or loaded from KV later.
+	const gamma: SystemAppConfigEntry = {
+		appSlug: "gamma",
+		allowedDomains: ["public-api.gamma.app"],
+		baseUrl: "https://public-api.gamma.app/v0.2",
+		auth: {
+			type: "api_key_header",
+			header: "X-API-KEY",
+			valueEnv: "GAMMA_API_KEY",
+		},
+		defaultHeaders: { Accept: "application/json" },
+	};
+	return [gamma];
+}
+
+function resolveSystemAppFromFullUrl(
+	urlStr: string,
+	config: SystemAppsConfig,
+): SystemAppConfigEntry | undefined {
+	let host: string | undefined;
+	try {
+		host = new URL(urlStr).hostname.toLowerCase();
+	} catch {
+		return undefined;
+	}
+	if (!host) return undefined;
+	for (const entry of config) {
+		if (entry.allowedDomains.some((d) => d === host)) return entry;
+		if (entry.allowedDomains.some((d) => host.endsWith(`.${d}`))) return entry;
+	}
+	return undefined;
+}
+
+function buildSystemUrl(inputUrl: string, app: SystemAppConfigEntry): string {
+	// If absolute URL, return as-is. Otherwise, resolve against baseUrl.
+	if (/^https?:\/\//i.test(inputUrl)) return inputUrl;
+	try {
+		const base = app.baseUrl.endsWith("/") ? app.baseUrl : app.baseUrl + "/";
+		const rel = inputUrl.startsWith("/") ? inputUrl.slice(1) : inputUrl;
+		return new URL(rel, base).toString();
+	} catch {
+		return app.baseUrl;
+	}
+}
+
+async function directSystemRequest(
+	env: Env,
+	params: {
+		method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+		url: string; // may be relative or absolute
+		headers?: Record<string, string>;
+		body?: unknown;
+		app: SystemAppConfigEntry;
+	},
+): Promise<{ status: number; data: any }> {
+	// Validate absolute URLs against allowlist
+	const isFullUrl = /^https?:\/\//i.test(params.url);
+	if (isFullUrl) {
+		try {
+			const u = new URL(params.url);
+			const host = u.hostname.toLowerCase();
+			const allowed = params.app.allowedDomains;
+			const ok =
+				allowed.includes(host) || allowed.some((d) => host.endsWith(`.${d}`));
+			if (!ok) {
+				return {
+					status: 400,
+					data: {
+						error: "not_allowed_for_system_app",
+						message:
+							`The URL host '${host}' is not allowed for system app '${params.app.appSlug}'.`,
+						allowed_domains: params.app.allowedDomains,
+					},
+				};
+			}
+		} catch {}
+	}
+
+	const finalUrl = buildSystemUrl(params.url, params.app);
+
+	// Prepare headers
+	const headers: Record<string, string> = {};
+	const userHeaders = sanitizeProxyHeaders(params.headers);
+	if (userHeaders) Object.assign(headers, userHeaders);
+	// Remove potentially conflicting auth
+	for (const k of Object.keys(headers)) {
+		if (k.toLowerCase() === "authorization") delete headers[k];
+	}
+
+	// Inject auth
+	switch (params.app.auth.type) {
+		case "api_key_header": {
+			const envKey = params.app.auth.valueEnv;
+			const secret = (env as any)[envKey] as string | undefined;
+			if (!secret) {
+				return {
+					status: 500,
+					data: {
+						error: "system_secret_missing",
+						message: `Missing secret '${envKey}' for system app '${params.app.appSlug}'.`,
+					},
+				};
+			}
+			headers[params.app.auth.header] = secret;
+			break;
+		}
+	}
+
+	if (!headers["Accept"]) headers["Accept"] = "application/json";
+	if (params.app.defaultHeaders)
+		Object.assign(headers, params.app.defaultHeaders);
+
+	// Body handling
+	let bodyToSend: BodyInit | null = null;
+	if (params.body !== undefined) {
+		if (typeof params.body === "string") {
+			bodyToSend = params.body as string;
+			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
+		} else {
+			bodyToSend = JSON.stringify(params.body);
+			if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+		}
+	}
+
+	const resp = await fetch(finalUrl, {
+		method: params.method,
+		headers,
+		body: bodyToSend,
+	});
+	const text = await resp.text();
+	let data: any;
+	try {
+		data = JSON.parse(text);
+	} catch {
+		data = text;
+	}
+	return { status: resp.status, data };
 }
 
 // ---- Pipedream Connect helpers ----
@@ -421,14 +582,20 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						"Accept": "application/vnd.github+json",
 						"Content-Type": "application/json",
 						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": "asi-mcp-worker/1.0",
 					},
 					body: JSON.stringify({ title, body }),
 				});
 				if (!resp.ok) {
 					let message = `GitHub error ${resp.status}`;
 					try {
-						const j: any = await resp.json();
-						message = j?.message || message;
+						const text = await resp.text();
+						try {
+							const j: any = JSON.parse(text);
+							message = j?.message || message;
+						} catch {
+							if (text) message = `${message}: ${text.substring(0, 300)}`;
+						}
 					} catch {}
 					return { error: message } as any;
 				}
@@ -597,6 +764,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				body: z.union([z.string(), z.record(z.any())]).optional(),
 				account_id: z.string().optional(),
 				app: z.string().optional(),
+				provider: z.enum(["system", "pipedream"]).optional(),
 			},
 			async ({
 				method,
@@ -605,6 +773,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				body,
 				account_id,
 				app,
+				provider,
 			}: {
 				method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 				url: string;
@@ -612,15 +781,63 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				body?: string | Record<string, unknown>;
 				account_id?: string;
 				app?: string;
+				provider?: "system" | "pipedream";
 			}) => {
 				const external_user_id = this.getExternalUserId();
-				const pdToken = await getPdAccessToken(this.env);
+
+				// System apps resolution
+				const systemApps = getSystemAppsConfig(this.env);
+				const systemAppBySlug = app
+					? systemApps.find((e) => e.appSlug === app)
+					: undefined;
+				const isFullUrl = /^https?:\/\//i.test(url);
+				const systemAppByUrl = !systemAppBySlug && isFullUrl
+					? resolveSystemAppFromFullUrl(url, systemApps)
+					: undefined;
+				let selectedSystemApp = systemAppBySlug || systemAppByUrl;
+
+				// If explicitly requested system provider, enforce resolution
+				if (provider === "system") {
+					if (!selectedSystemApp) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "system_app_required",
+										message:
+											"Provider set to system, but no matching system app found. Pass app or use a URL matching an allowed domain.",
+										allowed_system_apps: systemApps.map((e) => e.appSlug),
+									}),
+								},
+							],
+						};
+					}
+					const sysResult = await directSystemRequest(this.env, {
+						method,
+						url,
+						headers,
+						body: typeof body === "string" ? (() => { try { return JSON.parse(body); } catch { return body; } })() : body,
+						app: selectedSystemApp,
+					});
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({ provider: "system", app: selectedSystemApp.appSlug, ...sysResult }),
+							},
+						],
+					};
+				}
+
+				// Lazy-fetch Pipedream token only if needed
+				let pdToken: string | undefined;
 
 				// Resolve app slug dynamically when possible
 				let resolvedApp = app;
-				const isFullUrl = /^https?:\/\//i.test(url);
 				if (!resolvedApp && isFullUrl) {
 					try {
+						pdToken = pdToken || (await getPdAccessToken(this.env));
 						const index = await fetchProxyEnabledApps(this.env, pdToken);
 						const { app: detectedApp, dynamic } = resolveAppFromFullUrl(
 							url,
@@ -636,11 +853,29 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					} catch {}
 				}
 
-				// (removed) static host->app fallback; rely on Pipedream index and account lookup
+				// Prefer system app if available and no explicit account_id or provider override
+				if (!account_id && !provider && selectedSystemApp) {
+					const sysResult = await directSystemRequest(this.env, {
+						method,
+						url,
+						headers,
+						body: typeof body === "string" ? (() => { try { return JSON.parse(body); } catch { return body; } })() : body,
+						app: selectedSystemApp,
+					});
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({ provider: "system", app: selectedSystemApp.appSlug, ...sysResult }),
+							},
+						],
+					};
+				}
 
 				// If account_id provided but app still unknown, derive app from account details
 				if (!resolvedApp && account_id) {
 					try {
+						pdToken = pdToken || (await getPdAccessToken(this.env));
 						const detailed: any = await getAccountWithCredentials(
 							this.env,
 							pdToken,
@@ -655,6 +890,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				if (!resolvedApp) {
 					let supported: string[] = [];
 					try {
+						pdToken = pdToken || (await getPdAccessToken(this.env));
 						const index = await fetchProxyEnabledApps(this.env, pdToken);
 						supported = index.map((e) => e.appSlug);
 					} catch {}
@@ -671,7 +907,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 									action:
 										"Pass the app parameter and a relative path (e.g., '/crm/v3/...'), or use auth.connect to add support.",
 									note:
-										"TODO: Implement feedback tool to capture unsupported API requests.",
+										"Tip: Use the send_feedback tool to report unsupported API requests.",
 								}),
 							},
 						],
@@ -681,6 +917,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				// Resolve account
 				let acctId = account_id;
 				if (!acctId) {
+					pdToken = pdToken || (await getPdAccessToken(this.env));
 					const listed = await listAccountsForUser(
 						this.env,
 						pdToken,
@@ -691,6 +928,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					acctId = listed?.data?.[0]?.id;
 				}
 				if (!acctId) {
+					pdToken = pdToken || (await getPdAccessToken(this.env));
 					const connectUrl = await createConnectLink(
 						this.env,
 						pdToken,
@@ -721,6 +959,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					}
 				}
 
+				pdToken = pdToken || (await getPdAccessToken(this.env));
 				const result = await proxyRequest(this.env, pdToken, {
 					external_user_id,
 					account_id: acctId,
@@ -738,6 +977,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				) {
 					let allowed: string[] | undefined;
 					try {
+						pdToken = pdToken || (await getPdAccessToken(this.env));
 						const index = await fetchProxyEnabledApps(this.env, pdToken);
 						const entry = index.find((e) => e.appSlug === resolvedApp);
 						allowed = entry?.allowedDomains;
@@ -775,9 +1015,9 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			},
 		);
 
-		// -------- feedback_create_issue --------
+		// -------- send_feedback --------
 		this.server.tool(
-			"feedback_create_issue",
+			"send_feedback",
 			{
 				title: z
 					.string()
