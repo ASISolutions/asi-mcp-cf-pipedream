@@ -605,49 +605,92 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			const email = (this.props?.email as string | undefined) || undefined;
 			const app = deriveApp(args);
 
-			// Attach user/app to scope for this call
-			Sentry.setUser(email ? { id: sub, email } : { id: sub ?? "unknown" });
-			Sentry.setTag("tool", toolName);
-			if (app) Sentry.setTag("app", app);
+			// Safely attempt Sentry operations with fallback
+			const safeSentryCall = (operation: () => void) => {
+				try {
+					if (this.env.SENTRY_DSN) {
+						operation();
+					}
+				} catch (error) {
+					// Silent fallback - don't break the request if Sentry fails
+					console.warn(`Sentry operation failed:`, error);
+				}
+			};
 
-			// Breadcrumb with sanitized inputs
-			Sentry.addBreadcrumb({
-				category: "mcp.tool.called",
-				level: "info",
-				data: { tool: toolName, app, args: this.sanitizeArgs(args) },
+			// Attach user/app to scope for this call
+			safeSentryCall(() => {
+				Sentry.setUser(email ? { id: sub, email } : { id: sub ?? "unknown" });
+				Sentry.setTag("tool", toolName);
+				if (app) Sentry.setTag("app", app);
 			});
 
-			// One transaction-like span per tool call
-			return await Sentry.startSpan(
-				{
-					name: `mcp.tool/${toolName}`,
-					op: "mcp.tool",
-					forceTransaction: true,
-					attributes: {
-						"mcp.user.sub": sub ?? "unknown",
-						...(app ? { "mcp.app": app } : {}),
-					},
-				},
-				async () => {
-					try {
-						const result = await handler(args);
-						return result;
-					} catch (err) {
-						// Propagate a useful error up to the client AND capture it
-						const eventId = Sentry.captureException(err, {
-							tags: { tool: toolName, app },
-						});
-						return {
-							content: [
-								{
-									type: "text",
-									text: JSON.stringify({ error: "internal_error", eventId }),
-								},
-							],
-						};
-					}
-				},
-			);
+			// Breadcrumb with sanitized inputs
+			safeSentryCall(() => {
+				Sentry.addBreadcrumb({
+					category: "mcp.tool.called",
+					level: "info",
+					data: { tool: toolName, app, args: this.sanitizeArgs(args) },
+				});
+			});
+
+			// One transaction-like span per tool call (with fallback)
+			if (this.env.SENTRY_DSN) {
+				try {
+					return await Sentry.startSpan(
+						{
+							name: `mcp.tool/${toolName}`,
+							op: "mcp.tool",
+							forceTransaction: true,
+							attributes: {
+								"mcp.user.sub": sub ?? "unknown",
+								...(app ? { "mcp.app": app } : {}),
+							},
+						},
+						async () => {
+							try {
+								const result = await handler(args);
+								return result;
+							} catch (err) {
+								// Try to capture error, but don't fail if Sentry is down
+								let eventId = "unavailable";
+								safeSentryCall(() => {
+									eventId = Sentry.captureException(err, {
+										tags: { tool: toolName, app },
+									});
+								});
+								return {
+									content: [
+										{
+											type: "text",
+											text: JSON.stringify({ error: "internal_error", eventId }),
+										},
+									],
+								};
+							}
+						},
+					);
+				} catch (sentryError) {
+					console.warn(`Sentry span creation failed, falling back to direct execution:`, sentryError);
+					// Fallback to direct execution without Sentry
+				}
+			}
+			
+			// Direct execution fallback (when Sentry is unavailable or disabled)
+			try {
+				const result = await handler(args);
+				return result;
+			} catch (err) {
+				// Log error locally when Sentry is unavailable
+				console.error(`Tool ${toolName} error:`, err);
+				return {
+					content: [
+						{
+							type: "text", 
+							text: JSON.stringify({ error: "internal_error", eventId: "sentry_unavailable" })
+						},
+					],
+				};
+			}
 		};
 	}
 
@@ -1125,49 +1168,67 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 
 					pdToken = pdToken || (await getPdAccessToken(this.env));
 
-					// Add nested span for the actual HTTP request
-					const result = await Sentry.startSpan(
-						{
-							name: "mcp.proxy.request",
-							op: "http.client",
-							attributes: {
-								"http.method": method,
-								"http.url": new URL(url, "https://example.com").origin, // avoid path params in spans
-								"dest.host": isFullUrl
-									? new URL(url).hostname
-									: "api.pipedream.com",
-								"mcp.app": resolvedApp ?? "unknown",
-							},
-						},
-						async () => {
-							const resp = await proxyRequest(this.env, pdToken!, {
-								external_user_id,
-								account_id: acctId,
-								method,
-								url,
-								headers,
-								body: proxyBody,
-							});
+					// Add nested span for the actual HTTP request (with fallback)
+					let result: any;
+					const executeProxyRequest = async () => {
+						const resp = await proxyRequest(this.env, pdToken!, {
+							external_user_id,
+							account_id: acctId,
+							method,
+							url,
+							headers,
+							body: proxyBody,
+						});
 
-							// Add breadcrumb with response info
-							Sentry.addBreadcrumb({
-								category: "mcp.proxy.response",
-								level:
-									resp.status >= 500
-										? "error"
-										: resp.status >= 400
-											? "warning"
-											: "info",
-								data: {
-									status: resp.status,
-									app: resolvedApp,
-									host: isFullUrl ? new URL(url).hostname : "api.pipedream.com",
+						// Safely add breadcrumb with response info
+						try {
+							if (this.env.SENTRY_DSN) {
+								Sentry.addBreadcrumb({
+									category: "mcp.proxy.response",
+									level:
+										resp.status >= 500
+											? "error"
+											: resp.status >= 400
+												? "warning"
+												: "info",
+									data: {
+										status: resp.status,
+										app: resolvedApp,
+										host: isFullUrl ? new URL(url).hostname : "api.pipedream.com",
+									},
+								});
+							}
+						} catch (sentryError) {
+							console.warn(`Sentry breadcrumb failed:`, sentryError);
+						}
+
+						return resp;
+					};
+
+					if (this.env.SENTRY_DSN) {
+						try {
+							result = await Sentry.startSpan(
+								{
+									name: "mcp.proxy.request",
+									op: "http.client",
+									attributes: {
+										"http.method": method,
+										"http.url": new URL(url, "https://example.com").origin, // avoid path params in spans
+										"dest.host": isFullUrl
+											? new URL(url).hostname
+											: "api.pipedream.com",
+										"mcp.app": resolvedApp ?? "unknown",
+									},
 								},
-							});
-
-							return resp;
-						},
-					);
+								executeProxyRequest,
+							);
+						} catch (sentryError) {
+							console.warn(`Sentry HTTP span failed, falling back to direct execution:`, sentryError);
+							result = await executeProxyRequest();
+						}
+					} else {
+						result = await executeProxyRequest();
+					}
 
 					// Intercept common mismatch error to provide clearer guidance
 					if (
@@ -1339,23 +1400,51 @@ const provider = new OAuthProvider({
 	scopesSupported: ["openid", "email", "profile"],
 });
 
-// Export the OAuth Provider wrapped with Sentry
-export default Sentry.withSentry(
-	(env: Env) => {
-		const { id: versionId } = env.CF_VERSION_METADATA || { id: "dev" };
-		return {
-			dsn: env.SENTRY_DSN,
-			environment: env.SENTRY_ENV ?? env.PIPEDREAM_ENV,
-			release: versionId,
-			// capture headers/IP (you can set this false if you prefer)
-			sendDefaultPii: true,
-			// Logs: forwards console.* to Sentry Logs
-			enableLogs: true,
-			// Tracing: 100% since volume is low (tune later)
-			tracesSampleRate: 1.0,
-			// Belt & suspenders token-scrubber
-			beforeSend: scrubEvent as any,
-		};
-	},
-	provider as unknown as ExportedHandler<Env>,
-);
+// Helper to safely wrap with Sentry or fallback gracefully
+function createSentryWrappedHandler(
+	provider: unknown,
+): ExportedHandler<Env> {
+	return {
+		fetch: async (request, env, ctx) => {
+			// Check if Sentry should be enabled
+			if (!env.SENTRY_DSN) {
+				console.log("Sentry DSN not configured, running without Sentry monitoring");
+				return (provider as any).fetch(request, env, ctx);
+			}
+
+			try {
+				// Try to wrap with Sentry
+				const sentryWrapped = Sentry.withSentry(
+					(env: Env) => {
+						const { id: versionId } = env.CF_VERSION_METADATA || { id: "dev" };
+						return {
+							dsn: env.SENTRY_DSN,
+							environment: env.SENTRY_ENV ?? env.PIPEDREAM_ENV,
+							release: versionId,
+							// capture headers/IP (you can set this false if you prefer)
+							sendDefaultPii: true,
+							// Logs: forwards console.* to Sentry Logs  
+							enableLogs: true,
+							// Tracing: 100% since volume is low (tune later)
+							tracesSampleRate: 1.0,
+							// Belt & suspenders token-scrubber
+							beforeSend: scrubEvent as any,
+						};
+					},
+					provider as unknown as ExportedHandler<Env>,
+				);
+				if (sentryWrapped?.fetch) {
+					return await sentryWrapped.fetch(request, env, ctx);
+				}
+				throw new Error("Sentry wrapper did not return expected handler");
+			} catch (sentryError) {
+				console.error("Sentry initialization failed, falling back to direct execution:", sentryError);
+				// Fallback to direct provider execution
+				return (provider as any).fetch(request, env, ctx);
+			}
+		},
+	};
+}
+
+// Export the OAuth Provider with resilient Sentry wrapper
+export default createSentryWrappedHandler(provider);
