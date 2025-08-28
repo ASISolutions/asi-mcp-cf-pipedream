@@ -71,6 +71,8 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 4. **`auth_apps`** - List available apps with proxy support
 5. **`proxy_request`** - Make authenticated requests through Pipedream proxy
 6. **`send_feedback`** - Create GitHub issues for user feedback
+7. **`search_sop_docs`** - Search ASI Solutions SOP documentation on GitHub
+8. **`get_sop_process`** - Get specific SOP process by process code
 
 ### Authentication Flow
 
@@ -119,9 +121,14 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 ### Optional Features
 - `CONNECT_SUCCESS_REDIRECT` - Redirect after successful OAuth
 - `CONNECT_ERROR_REDIRECT` - Redirect after OAuth error
-- `GITHUB_TOKEN` - GitHub token for feedback issues
+- `GITHUB_TOKEN` - GitHub token for feedback issues and SOP documentation access
 - `GITHUB_REPO` - GitHub repo for feedback (owner/repo format)
 - `GAMMA_API_KEY` - API key for Gamma system app
+
+### GitHub SOP Documentation
+- `GITHUB_SOP_OWNER` - Owner of SOP docs repository (defaults to "ASISolutions")
+- `GITHUB_SOP_REPO` - Name of SOP docs repository (defaults to "docs")  
+- `GITHUB_SOP_BRANCH` - Branch of SOP docs repository (defaults to "main")
 
 ## Development Patterns
 

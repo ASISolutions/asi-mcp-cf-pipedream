@@ -16,6 +16,7 @@
 		"@modelcontextprotocol/sdk": "^1.17.1",
 		"@sentry/cloudflare": "^10.5.0",
 		"agents": "^0.0.109",
+		"yaml": "^2.8.1",
 		"zod": "^3.25.76"
 	},
 	"devDependencies": {

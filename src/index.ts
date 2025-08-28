@@ -6,6 +6,7 @@ import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import AccessDefaultHandler from "./access-handler";
 import type { Props } from "./workers-oauth-utils";
+import { SOPSearchService } from "./github-sop-search";
 
 // ---- Environment Types ----
 export interface Env {
@@ -39,6 +40,11 @@ export interface Env {
 	GITHUB_TOKEN: string; // GitHub Personal Access Token with repo:issues
 	GITHUB_REPO: string; // "owner/repo"
 	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
+	
+	// GitHub SOP Documentation configuration
+	GITHUB_SOP_OWNER?: string; // SOP docs repository owner (defaults to "ASISolutions")
+	GITHUB_SOP_REPO?: string; // SOP docs repository name (defaults to "docs")
+	GITHUB_SOP_BRANCH?: string; // SOP docs branch (defaults to "main")
 
 	// System app API keys / secrets
 	GAMMA_API_KEY?: string;
@@ -1355,6 +1361,206 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 							},
 						],
 					};
+				},
+			),
+		);
+
+		// -------- search_sop_docs --------
+		this.server.tool(
+			"search_sop_docs",
+			{
+				query: z.string().min(1).max(200),
+				search_type: z.enum(['process', 'quick', 'system', 'sales', 'finance', 'operations', 'support']).optional(),
+				system: z.string().optional(),
+				limit: z.number().min(1).max(20).optional(),
+				include_content: z.boolean().optional(),
+			},
+			this.withSentryInstrumentation(
+				"search_sop_docs",
+				() => undefined, // no single app
+				async ({
+					query,
+					search_type,
+					system,
+					limit,
+					include_content,
+				}: {
+					query: string;
+					search_type?: 'process' | 'quick' | 'system' | 'sales' | 'finance' | 'operations' | 'support';
+					system?: string;
+					limit?: number;
+					include_content?: boolean;
+				}) => {
+					const token = this.env.GITHUB_TOKEN;
+					if (!token) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "github_not_configured",
+										message: "GitHub token not configured for SOP documentation search",
+									}),
+								},
+							],
+						};
+					}
+
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
+					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
+
+					try {
+						const sopService = new SOPSearchService(token, sopOwner, sopRepo, sopBranch);
+						const results = await sopService.search(query, {
+							searchType: search_type,
+							system,
+							limit: limit || 5,
+							includeContent: include_content || false,
+						});
+
+						if (results.length === 0) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											query,
+											results: [],
+											total_results: 0,
+											message: "No matching SOP documents found. Try different search terms or check if the repository exists.",
+										}),
+									},
+								],
+							};
+						}
+
+						// Format results for response
+						const formattedResults = results.map(result => ({
+							path: result.path,
+							process_code: result.metadata.process_code,
+							title: result.metadata.title,
+							description: result.metadata.description,
+							category: result.metadata.category,
+							systems: result.metadata.systems ? Object.keys(result.metadata.systems) : undefined,
+							estimated_time: result.metadata.estimated_time,
+							requires_approval: result.metadata.requires_approval,
+							owner: result.metadata.owner,
+							last_modified: result.metadata.last_modified,
+							...(include_content && { content: result.content }),
+							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+						}));
+
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										query,
+										search_type,
+										system,
+										results: formattedResults,
+										total_results: formattedResults.length,
+										repository: `${sopOwner}/${sopRepo}`,
+									}),
+								},
+							],
+						};
+					} catch (error) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "search_failed",
+										message: `SOP documentation search failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+										query,
+									}),
+								},
+							],
+						};
+					}
+				},
+			),
+		);
+
+		// -------- get_sop_process --------
+		this.server.tool(
+			"get_sop_process",
+			{
+				process_code: z.string().regex(/^[A-Z]+-\d{3}$/, "Process code must be in format CATEGORY-001"),
+			},
+			this.withSentryInstrumentation(
+				"get_sop_process",
+				() => undefined,
+				async ({ process_code }: { process_code: string }) => {
+					const token = this.env.GITHUB_TOKEN;
+					if (!token) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "github_not_configured",
+										message: "GitHub token not configured for SOP documentation access",
+									}),
+								},
+							],
+						};
+					}
+
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
+					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
+
+					try {
+						const sopService = new SOPSearchService(token, sopOwner, sopRepo, sopBranch);
+						const result = await sopService.getByProcessCode(process_code);
+
+						if (!result) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											error: "process_not_found",
+											message: `Process ${process_code} not found in SOP documentation`,
+											process_code,
+										}),
+									},
+								],
+							};
+						}
+
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										process_code,
+										path: result.path,
+										metadata: result.metadata,
+										content: result.content,
+										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+										repository: `${sopOwner}/${sopRepo}`,
+									}),
+								},
+							],
+						};
+					} catch (error) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "process_fetch_failed",
+										message: `Failed to fetch process ${process_code}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+										process_code,
+									}),
+								},
+							],
+						};
+					}
 				},
 			),
 		);
