@@ -1,7 +1,7 @@
 // src/index.ts
 import * as Sentry from "@sentry/cloudflare";
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
 import AccessDefaultHandler from "./access-handler";
@@ -1357,6 +1357,375 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					};
 				},
 			),
+		);
+
+		// -------- MCP Prompts --------
+		
+		// Git commit message generator
+		this.server.registerPrompt(
+			"git-commit",
+			{
+				title: "Generate a Git commit message",
+				description: "Create a concise commit message based on your changes",
+				argsSchema: {
+					changes: z.string().describe("Description of the changes made"),
+					type: z.enum(["feat", "fix", "docs", "style", "refactor", "test", "chore"]).optional().describe("Type of change")
+				}
+			},
+			({ changes, type }) => ({
+				messages: [
+					{
+						role: "user",
+						content: {
+							type: "text",
+							text: `Write a concise commit message for these changes:\n\n${changes}\n\n${type ? `Type of change: ${type}\n\n` : ""}Follow conventional commit format. Be specific and actionable.`
+						}
+					}
+				]
+			})
+		);
+
+		// API documentation helper
+		this.server.registerPrompt(
+			"api-docs",
+			{
+				title: "Generate API documentation",
+				description: "Create documentation for API endpoints or functions",
+				argsSchema: {
+					code: z.string().describe("The code or API endpoint to document"),
+					format: z.enum(["markdown", "jsdoc", "openapi"]).optional().describe("Documentation format"),
+					includeExamples: z.string().optional().describe("Include usage examples (true/false)")
+				}
+			},
+			({ code, format, includeExamples }) => ({
+				messages: [
+					{
+						role: "user",
+						content: {
+							type: "text",
+							text: `Create ${format || "comprehensive"} documentation for this code:\n\n\`\`\`\n${code}\n\`\`\`\n\n${includeExamples === "true" ? "Include practical usage examples and common patterns.\n\n" : ""}Focus on parameters, return values, error cases, and integration notes.`
+						}
+					}
+				]
+			})
+		);
+
+		// Debug helper prompt
+		this.server.registerPrompt(
+			"debug-issue",
+			{
+				title: "Debug code issue",
+				description: "Help analyze and debug a code issue or error",
+				argsSchema: {
+					error: z.string().describe("The error message or description"),
+					code: z.string().optional().describe("Relevant code context"),
+					environment: z.string().optional().describe("Environment or platform details")
+				}
+			},
+			({ error, code, environment }) => ({
+				messages: [
+					{
+						role: "user",
+						content: {
+							type: "text",
+							text: `Help me debug this issue:\n\nError: ${error}\n\n${code ? `Code context:\n\`\`\`\n${code}\n\`\`\`\n\n` : ""}${environment ? `Environment: ${environment}\n\n` : ""}Provide step-by-step debugging approach, potential root causes, and solutions.`
+						}
+					}
+				]
+			})
+		);
+
+		// -------- MCP Resources --------
+
+		// Project info resource
+		this.server.registerResource(
+			"project-info",
+			new ResourceTemplate("project-info://{section}", { list: undefined }),
+			{
+				title: "ASI Connect MCP Project Information",
+				description: "Provides information about the ASI Connect MCP server project",
+				mimeType: "text/plain"
+			},
+			async (uri, { section }) => {
+				let content = "";
+				const title = `ASI Connect MCP - ${section}`;
+				
+				const sectionStr = Array.isArray(section) ? section[0] : section;
+				switch (sectionStr?.toLowerCase()) {
+					case "overview":
+						content = `ASI Connect MCP Server
+
+This is a production-ready remote MCP (Model Context Protocol) server that runs on Cloudflare Workers. It provides OAuth-protected access to multiple APIs through Pipedream Connect and direct system app authentication.
+
+Key Features:
+- OAuth authentication via Cloudflare Access
+- Pipedream Connect integration for 3rd party APIs
+- System app support for direct API key authentication
+- Sentry monitoring and error tracking
+- KV storage for caching and state management
+
+Architecture:
+- Built on Cloudflare Workers with TypeScript
+- Uses MCP SDK for protocol implementation
+- Integrates with Pipedream for OAuth management
+- Supports both proxy and direct API requests`;
+						break;
+					
+					case "tools":
+						content = `Available MCP Tools:
+
+1. auth_status - Check authentication status for connected apps
+2. auth_connect - Generate Pipedream Connect Links for OAuth
+3. auth_disconnect - Remove stored credentials for apps  
+4. auth_apps - List available apps with proxy support
+5. proxy_request - Make authenticated requests through Pipedream proxy
+6. send_feedback - Create GitHub issues for user feedback
+
+Each tool supports comprehensive error handling and Sentry monitoring for production use.`;
+						break;
+					
+					case "setup":
+						content = `Development Setup:
+
+1. Environment Variables:
+   - ACCESS_CLIENT_ID, ACCESS_CLIENT_SECRET (Cloudflare Access OAuth)
+   - PIPEDREAM_CLIENT_ID, PIPEDREAM_CLIENT_SECRET, PIPEDREAM_PROJECT_ID
+   - SENTRY_DSN (optional monitoring)
+   - GITHUB_TOKEN, GITHUB_REPO (optional feedback)
+
+2. Development Commands:
+   - npm run dev - Start development server
+   - npm run format - Format code with Biome
+   - npm run type-check - TypeScript validation
+   - npm run deploy - Deploy to Cloudflare Workers
+
+3. Local Testing:
+   - MCP SSE endpoint: http://localhost:8788/sse
+   - OAuth authorize: http://localhost:8788/authorize`;
+						break;
+					
+					default:
+						content = `Available sections: overview, tools, setup
+
+Use: project-info://overview for general information
+Use: project-info://tools for available MCP tools
+Use: project-info://setup for development setup instructions`;
+				}
+
+				return {
+					contents: [
+						{
+							uri: uri.href,
+							name: `${sectionStr || "index"}.txt`,
+							title,
+							mimeType: "text/plain",
+							text: content
+						}
+					]
+				};
+			}
+		);
+
+		// Environment status resource
+		this.server.registerResource(
+			"env-status",
+			new ResourceTemplate("env-status://{component}", { list: undefined }),
+			{
+				title: "Environment Status",
+				description: "Check configuration status of various components",
+				mimeType: "application/json"
+			},
+			async (uri, { component }) => {
+				let status = {};
+				
+				const componentStr = Array.isArray(component) ? component[0] : component;
+				switch (componentStr?.toLowerCase()) {
+					case "oauth":
+						status = {
+							component: "OAuth Configuration",
+							cloudflareAccess: {
+								clientId: !!this.env.ACCESS_CLIENT_ID,
+								clientSecret: !!this.env.ACCESS_CLIENT_SECRET,
+								tokenUrl: !!this.env.ACCESS_TOKEN_URL,
+								authUrl: !!this.env.ACCESS_AUTHORIZATION_URL,
+								jwksUrl: !!this.env.ACCESS_JWKS_URL,
+								cookieKey: !!this.env.COOKIE_ENCRYPTION_KEY
+							}
+						};
+						break;
+					
+					case "pipedream":
+						status = {
+							component: "Pipedream Configuration",
+							connect: {
+								clientId: !!this.env.PIPEDREAM_CLIENT_ID,
+								clientSecret: !!this.env.PIPEDREAM_CLIENT_SECRET,
+								projectId: !!this.env.PIPEDREAM_PROJECT_ID,
+								environment: this.env.PIPEDREAM_ENV || "not_set"
+							}
+						};
+						break;
+					
+					case "monitoring":
+						status = {
+							component: "Monitoring Configuration", 
+							sentry: {
+								dsnConfigured: !!this.env.SENTRY_DSN,
+								environment: this.env.SENTRY_ENV || "not_set"
+							},
+							github: {
+								tokenConfigured: !!this.env.GITHUB_TOKEN,
+								repoConfigured: !!this.env.GITHUB_REPO
+							}
+						};
+						break;
+					
+					case "storage":
+						status = {
+							component: "Storage Configuration",
+							kv: {
+								oauthNamespace: !!this.env.OAUTH_KV,
+								userLinksNamespace: !!this.env.USER_LINKS
+							}
+						};
+						break;
+					
+					default:
+						status = {
+							availableComponents: ["oauth", "pipedream", "monitoring", "storage"],
+							usage: "Use env-status://oauth, env-status://pipedream, etc."
+						};
+				}
+
+				return {
+					contents: [
+						{
+							uri: uri.href,
+							name: `${componentStr || "index"}.json`,
+							title: `Environment Status - ${componentStr || "Index"}`,
+							mimeType: "application/json",
+							text: JSON.stringify(status, null, 2)
+						}
+					]
+				};
+			}
+		);
+
+		// API endpoint catalog resource
+		this.server.registerResource(
+			"api-catalog",
+			new ResourceTemplate("api-catalog://{category}", { list: undefined }),
+			{
+				title: "API Endpoint Catalog",
+				description: "Reference for available API endpoints and system apps",
+				mimeType: "text/markdown"
+			},
+			async (uri, { category }) => {
+				let content = "";
+				const categoryStr = Array.isArray(category) ? category[0] : category;
+				const title = `API Catalog - ${categoryStr || "Index"}`;
+				
+				switch (categoryStr?.toLowerCase()) {
+					case "system-apps":
+						const systemApps = getSystemAppsConfig(this.env);
+						content = `# System Apps Configuration
+
+System apps use direct API key authentication and bypass Pipedream Connect.
+
+## Available System Apps:
+
+${systemApps.map(app => `
+### ${app.appSlug}
+- **Base URL**: ${app.baseUrl}
+- **Allowed Domains**: ${app.allowedDomains.join(", ")}
+- **Auth Type**: ${app.auth.type}
+- **Auth Header**: ${app.auth.header}
+`).join("\n")}
+
+## Usage:
+\`\`\`json
+{
+  "method": "GET",
+  "url": "/api/endpoint",
+  "app": "gamma",
+  "provider": "system"
+}
+\`\`\``;
+						break;
+					
+					case "pipedream-apps":
+						content = `# Pipedream Connect Apps
+
+These apps use OAuth through Pipedream Connect and require user authentication.
+
+## Common Apps:
+- **HubSpot**: CRM, Marketing, Sales automation
+- **Xero**: Accounting and financial management  
+- **PandaDoc**: Document management and e-signatures
+- **Slack**: Team communication and workflows
+- **Google Workspace**: Gmail, Drive, Sheets, etc.
+
+## Usage Flow:
+1. Use \`auth_connect\` to get OAuth URL
+2. User completes OAuth flow
+3. Use \`proxy_request\` with account credentials
+
+## Example:
+\`\`\`json
+{
+  "method": "GET", 
+  "url": "https://api.hubapi.com/crm/v3/contacts",
+  "app": "hubspot"
+}
+\`\`\``;
+						break;
+					
+					case "endpoints":
+						content = `# MCP Server Endpoints
+
+## HTTP Endpoints:
+- **GET /sse** - Server-Sent Events MCP transport
+- **POST /mcp** - HTTP MCP transport  
+- **GET /authorize** - OAuth authorization endpoint
+- **POST /token** - OAuth token endpoint
+- **POST /register** - OAuth client registration
+
+## Local Development:
+- Base URL: http://localhost:8788
+- MCP Client should connect to: http://localhost:8788/sse
+
+## Production:
+- Deployed on Cloudflare Workers
+- Protected by Cloudflare Access OAuth`;
+						break;
+					
+					default:
+						content = `# API Catalog
+
+Available categories:
+
+## [system-apps](api-catalog://system-apps)
+Direct API key authenticated apps (Gamma, etc.)
+
+## [pipedream-apps](api-catalog://pipedream-apps)  
+OAuth authenticated apps via Pipedream Connect
+
+## [endpoints](api-catalog://endpoints)
+MCP server HTTP endpoints and transports`;
+				}
+
+				return {
+					contents: [
+						{
+							uri: uri.href,
+							name: `${categoryStr || "index"}.md`,
+							title,
+							mimeType: "text/markdown", 
+							text: content
+						}
+					]
+				};
+			}
 		);
 	}
 }
