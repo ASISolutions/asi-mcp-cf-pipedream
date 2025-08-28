@@ -2,6 +2,8 @@
 
 A production-ready remote MCP (Model Context Protocol) server that runs on Cloudflare Workers, integrates with Cloudflare Zero Trust for authentication, and uses Pipedream Connect to manage OAuth connections for HubSpot, Xero, and PandaDoc.
 
+**Testing Cloudflare preview URL deployment** ✨
+
 ## Features
 
 - **Remote MCP Server**: Runs on Cloudflare Workers with SSE transport
