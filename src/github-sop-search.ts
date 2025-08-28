@@ -137,13 +137,13 @@ export class SOPSearchService {
 		// Add path filters based on search type
 		if (options.searchType) {
 			const pathMap: Record<string, string> = {
-				'process': 'path:docs/processes',
-				'quick': 'path:docs/quick-actions',
-				'system': 'path:docs/systems',
-				'sales': 'path:docs/processes/sales',
-				'finance': 'path:docs/processes/finance',
-				'operations': 'path:docs/processes/operations',
-				'support': 'path:docs/processes/support'
+				'process': 'path:processes',
+				'quick': 'path:quick-actions',
+				'system': 'path:apps',
+				'sales': 'path:processes/sales',
+				'finance': 'path:processes/finance',
+				'operations': 'path:processes/operations',
+				'support': 'path:processes/support'
 			};
 			
 			if (pathMap[options.searchType]) {
@@ -284,37 +284,12 @@ export class SOPSearchService {
 	 * Get system configuration by Pipedream app slug
 	 */
 	async getSystemConfig(systemSlug: string): Promise<SystemConfig> {
-		const configPath = `docs/systems/${systemSlug}/_config.yml`;
-		
-		try {
-			const response = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}/contents/${configPath}`, {
-				headers: {
-					'Authorization': `Bearer ${this.githubToken}`,
-					'Accept': 'application/vnd.github+json',
-					'X-GitHub-Api-Version': '2022-11-28',
-					'User-Agent': 'asi-mcp-worker/1.0'
-				}
-			});
-
-			if (!response.ok) {
-				// Return minimal config if not found
-				return { 
-					pipedream_app: systemSlug,
-					display_name: systemSlug.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-				};
-			}
-
-			const data = await response.json() as { content: string };
-			const content = Buffer.from(data.content, 'base64').toString('utf-8');
-			return yamlParse(content) as SystemConfig;
-		} catch (error) {
-			console.warn(`Failed to fetch system config for ${systemSlug}:`, error);
-			// Return minimal config if failed
-			return { 
-				pipedream_app: systemSlug,
-				display_name: systemSlug.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-			};
-		}
+		// Since the current repo doesn't have _config.yml files, return minimal config
+		// This can be enhanced later if config files are added
+		return { 
+			pipedream_app: systemSlug,
+			display_name: systemSlug.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+		};
 	}
 
 	/**
@@ -340,7 +315,7 @@ export class SOPSearchService {
 	 * Get recent updates
 	 */
 	async getRecentlyModified(limit = 5): Promise<SOPSearchResult[]> {
-		const query = `repo:${this.owner}/${this.repo} path:docs/processes extension:md`;
+		const query = `repo:${this.owner}/${this.repo} path:processes extension:md`;
 		
 		try {
 			const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(query)}&sort=indexed&per_page=${limit}`, {

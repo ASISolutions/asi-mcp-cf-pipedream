@@ -1448,7 +1448,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 							owner: result.metadata.owner,
 							last_modified: result.metadata.last_modified,
 							...(include_content && { content: result.content }),
-							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '')}`,
 						}));
 
 						return {
@@ -1541,7 +1541,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 										path: result.path,
 										metadata: result.metadata,
 										content: result.content,
-										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '')}`,
 										repository: `${sopOwner}/${sopRepo}`,
 									}),
 								},
