@@ -1,0 +1,78 @@
+name: Preview Deployment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    name: Deploy Preview
+    
+    permissions:
+      contents: read
+      pull-requests: write
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+        
+      - name: Run type check
+        run: npm run type-check
+        
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy --name asi-mcp-pr-${{ github.event.number }} --compatibility-date 2025-08-24
+        env:
+          # Inherit all secrets for preview deployment
+          ACCESS_CLIENT_ID: ${{ secrets.ACCESS_CLIENT_ID }}
+          ACCESS_CLIENT_SECRET: ${{ secrets.ACCESS_CLIENT_SECRET }}
+          ACCESS_AUTHORIZATION_URL: ${{ secrets.ACCESS_AUTHORIZATION_URL }}
+          ACCESS_TOKEN_URL: ${{ secrets.ACCESS_TOKEN_URL }}
+          ACCESS_JWKS_URL: ${{ secrets.ACCESS_JWKS_URL }}
+          COOKIE_ENCRYPTION_KEY: ${{ secrets.COOKIE_ENCRYPTION_KEY }}
+          PIPEDREAM_CLIENT_ID: ${{ secrets.PIPEDREAM_CLIENT_ID }}
+          PIPEDREAM_CLIENT_SECRET: ${{ secrets.PIPEDREAM_CLIENT_SECRET }}
+          PIPEDREAM_PROJECT_ID: ${{ secrets.PIPEDREAM_PROJECT_ID }}
+          PIPEDREAM_ENV: ${{ secrets.PIPEDREAM_ENV }}
+          CONNECT_SUCCESS_REDIRECT: ${{ secrets.CONNECT_SUCCESS_REDIRECT }}
+          CONNECT_ERROR_REDIRECT: ${{ secrets.CONNECT_ERROR_REDIRECT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ secrets.GITHUB_REPO }}
+          GAMMA_API_KEY: ${{ secrets.GAMMA_API_KEY }}
+          
+      - name: Comment PR with preview URL
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const prNumber = context.issue.number;
+            const previewUrl = `https://asi-mcp-pr-${prNumber}.asi-solutions.workers.dev`;
+            
+            const comment = `## 🚀 Preview Deployment Ready!
+            
+            Your preview deployment is available at: **${previewUrl}**
+            
+            ### MCP Endpoints:
+            - SSE: \`${previewUrl}/sse\`
+            - OAuth: \`${previewUrl}/authorize\`
+            
+            This preview will be automatically updated with new commits to this PR.
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: prNumber,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
