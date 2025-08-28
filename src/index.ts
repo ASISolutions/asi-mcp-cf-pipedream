@@ -42,8 +42,8 @@ export interface Env {
 	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
 	
 	// GitHub SOP Documentation configuration
-	GITHUB_SOP_OWNER?: string; // SOP docs repository owner (defaults to "asi-solutions")
-	GITHUB_SOP_REPO?: string; // SOP docs repository name (defaults to "sop-docs")
+	GITHUB_SOP_OWNER?: string; // SOP docs repository owner (defaults to "ASISolutions")
+	GITHUB_SOP_REPO?: string; // SOP docs repository name (defaults to "docs")
 	GITHUB_SOP_BRANCH?: string; // SOP docs branch (defaults to "main")
 
 	// System app API keys / secrets
@@ -1391,8 +1391,13 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 					limit?: number;
 					include_content?: boolean;
 				}) => {
+					console.log(`🔍 SOP search called with:`, { query, search_type, system, limit, include_content });
+					
 					const token = this.env.GITHUB_TOKEN;
+					console.log(`🔑 GitHub token present: ${!!token}`);
+					
 					if (!token) {
+						console.error("❌ GitHub token missing");
 						return {
 							content: [
 								{
@@ -1406,18 +1411,23 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						};
 					}
 
-					const sopOwner = this.env.GITHUB_SOP_OWNER || "asi-solutions";
-					const sopRepo = this.env.GITHUB_SOP_REPO || "sop-docs";
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
 					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
+					
+					console.log(`📚 Using repository: ${sopOwner}/${sopRepo} (branch: ${sopBranch})`);
 
 					try {
 						const sopService = new SOPSearchService(token, sopOwner, sopRepo, sopBranch);
+						console.log(`🚀 Starting search...`);
 						const results = await sopService.search(query, {
 							searchType: search_type,
 							system,
 							limit: limit || 5,
 							includeContent: include_content || false,
 						});
+
+						console.log(`✅ Search completed, found ${results.length} results`);
 
 						if (results.length === 0) {
 							return {
@@ -1448,7 +1458,8 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 							owner: result.metadata.owner,
 							last_modified: result.metadata.last_modified,
 							...(include_content && { content: result.content }),
-							gitbook_url: `https://asi-solutions.gitbook.io/sop-docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '')}`,
+
 						}));
 
 						return {
@@ -1467,6 +1478,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 							],
 						};
 					} catch (error) {
+						console.error(`💥 Search error:`, error);
 						return {
 							content: [
 								{
@@ -1494,8 +1506,11 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				"get_sop_process",
 				() => undefined,
 				async ({ process_code }: { process_code: string }) => {
+					console.log(`🎯 Process lookup called for: ${process_code}`);
+					
 					const token = this.env.GITHUB_TOKEN;
 					if (!token) {
+						console.error("❌ GitHub token missing for process lookup");
 						return {
 							content: [
 								{
@@ -1509,8 +1524,8 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						};
 					}
 
-					const sopOwner = this.env.GITHUB_SOP_OWNER || "asi-solutions";
-					const sopRepo = this.env.GITHUB_SOP_REPO || "sop-docs";
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
 					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
 
 					try {
@@ -1518,6 +1533,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						const result = await sopService.getByProcessCode(process_code);
 
 						if (!result) {
+							console.log(`❌ Process ${process_code} not found`);
 							return {
 								content: [
 									{
@@ -1532,6 +1548,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 							};
 						}
 
+						console.log(`✅ Process ${process_code} found at ${result.path}`);
 						return {
 							content: [
 								{
@@ -1541,13 +1558,15 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 										path: result.path,
 										metadata: result.metadata,
 										content: result.content,
-										gitbook_url: `https://asi-solutions.gitbook.io/sop-docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '')}`,
+
 										repository: `${sopOwner}/${sopRepo}`,
 									}),
 								},
 							],
 						};
 					} catch (error) {
+						console.error(`💥 Process lookup error:`, error);
 						return {
 							content: [
 								{

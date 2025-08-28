@@ -126,8 +126,8 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 - `GAMMA_API_KEY` - API key for Gamma system app
 
 ### GitHub SOP Documentation
-- `GITHUB_SOP_OWNER` - Owner of SOP docs repository (defaults to "asi-solutions")
-- `GITHUB_SOP_REPO` - Name of SOP docs repository (defaults to "sop-docs")  
+- `GITHUB_SOP_OWNER` - Owner of SOP docs repository (defaults to "ASISolutions")
+- `GITHUB_SOP_REPO` - Name of SOP docs repository (defaults to "docs")  
 - `GITHUB_SOP_BRANCH` - Branch of SOP docs repository (defaults to "main")
 
 ## Development Patterns
