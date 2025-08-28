@@ -75,7 +75,7 @@ export class SOPSearchService {
 	private branch: string;
 	private githubToken: string;
 
-	constructor(githubToken: string, owner = 'asi-solutions', repo = 'sop-docs', branch = 'main') {
+	constructor(githubToken: string, owner = 'ASISolutions', repo = 'docs', branch = 'main') {
 		this.githubToken = githubToken;
 		this.owner = owner;
 		this.repo = repo;
