@@ -75,7 +75,7 @@ export class SOPSearchService {
 	private branch: string;
 	private githubToken: string;
 
-	constructor(githubToken: string, owner = 'asi-solutions', repo = 'sop-docs', branch = 'main') {
+	constructor(githubToken: string, owner = 'ASISolutions', repo = 'docs', branch = 'main') {
 		this.githubToken = githubToken;
 		this.owner = owner;
 		this.repo = repo;
@@ -97,7 +97,11 @@ export class SOPSearchService {
 		const searchQuery = this.buildSearchQuery(userQuery, options);
 		
 		try {
-			const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&sort=indexed&per_page=${options.limit || 5}`, {
+			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&sort=indexed&per_page=${options.limit || 5}`;
+			console.log(`GitHub search URL: ${searchUrl}`);
+			console.log(`GitHub search query: ${searchQuery}`);
+			
+			const response = await fetch(searchUrl, {
 				headers: {
 					'Authorization': `Bearer ${this.githubToken}`,
 					'Accept': 'application/vnd.github+json',
@@ -107,10 +111,13 @@ export class SOPSearchService {
 			});
 
 			if (!response.ok) {
-				throw new Error(`GitHub search failed: ${response.status}`);
+				const errorText = await response.text();
+				console.error(`GitHub search failed: ${response.status} - ${errorText}`);
+				throw new Error(`GitHub search failed: ${response.status} - ${errorText}`);
 			}
 
-			const data = await response.json() as { items: Array<{ path: string }> };
+			const data = await response.json() as { items: Array<{ path: string }>, total_count: number };
+			console.log(`GitHub search returned ${data.total_count} total results, ${data.items.length} items`);
 			
 			// Fetch full content for each result
 			const results = await Promise.allSettled(
@@ -137,13 +144,13 @@ export class SOPSearchService {
 		// Add path filters based on search type
 		if (options.searchType) {
 			const pathMap: Record<string, string> = {
-				'process': 'path:docs/processes',
-				'quick': 'path:docs/quick-actions',
-				'system': 'path:docs/systems',
-				'sales': 'path:docs/processes/sales',
-				'finance': 'path:docs/processes/finance',
-				'operations': 'path:docs/processes/operations',
-				'support': 'path:docs/processes/support'
+				'process': 'path:processes',
+				'quick': 'path:quick-actions',
+				'system': 'path:apps',
+				'sales': 'path:processes/sales',
+				'finance': 'path:processes/finance',
+				'operations': 'path:processes/operations',
+				'support': 'path:processes/support'
 			};
 			
 			if (pathMap[options.searchType]) {
@@ -185,9 +192,13 @@ export class SOPSearchService {
 	 */
 	async getByProcessCode(processCode: string): Promise<SOPSearchResult | null> {
 		const searchQuery = `repo:${this.owner}/${this.repo} process_code:${processCode} extension:md`;
+		console.log(`Process code search query: ${searchQuery}`);
 		
 		try {
-			const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&per_page=1`, {
+			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&per_page=1`;
+			console.log(`Process code search URL: ${searchUrl}`);
+			
+			const response = await fetch(searchUrl, {
 				headers: {
 					'Authorization': `Bearer ${this.githubToken}`,
 					'Accept': 'application/vnd.github+json',
@@ -200,9 +211,11 @@ export class SOPSearchService {
 				throw new Error(`GitHub search failed: ${response.status}`);
 			}
 
-			const data = await response.json() as { items: Array<{ path: string }> };
+			const data = await response.json() as { items: Array<{ path: string }>, total_count: number };
+			console.log(`Process code search returned ${data.total_count} total results, ${data.items.length} items`);
 			
 			if (data.items.length > 0) {
+				console.log(`Found process code in file: ${data.items[0].path}`);
 				return await this.fetchDocument(data.items[0].path, true);
 			}
 			return null;
@@ -284,37 +297,12 @@ export class SOPSearchService {
 	 * Get system configuration by Pipedream app slug
 	 */
 	async getSystemConfig(systemSlug: string): Promise<SystemConfig> {
-		const configPath = `docs/systems/${systemSlug}/_config.yml`;
-		
-		try {
-			const response = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}/contents/${configPath}`, {
-				headers: {
-					'Authorization': `Bearer ${this.githubToken}`,
-					'Accept': 'application/vnd.github+json',
-					'X-GitHub-Api-Version': '2022-11-28',
-					'User-Agent': 'asi-mcp-worker/1.0'
-				}
-			});
-
-			if (!response.ok) {
-				// Return minimal config if not found
-				return { 
-					pipedream_app: systemSlug,
-					display_name: systemSlug.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-				};
-			}
-
-			const data = await response.json() as { content: string };
-			const content = Buffer.from(data.content, 'base64').toString('utf-8');
-			return yamlParse(content) as SystemConfig;
-		} catch (error) {
-			console.warn(`Failed to fetch system config for ${systemSlug}:`, error);
-			// Return minimal config if failed
-			return { 
-				pipedream_app: systemSlug,
-				display_name: systemSlug.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
-			};
-		}
+		// Since the current repo doesn't have _config.yml files, return minimal config
+		// This can be enhanced later if config files are added
+		return { 
+			pipedream_app: systemSlug,
+			display_name: systemSlug.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+		};
 	}
 
 	/**
@@ -340,7 +328,7 @@ export class SOPSearchService {
 	 * Get recent updates
 	 */
 	async getRecentlyModified(limit = 5): Promise<SOPSearchResult[]> {
-		const query = `repo:${this.owner}/${this.repo} path:docs/processes extension:md`;
+		const query = `repo:${this.owner}/${this.repo} path:processes extension:md`;
 		
 		try {
 			const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(query)}&sort=indexed&per_page=${limit}`, {

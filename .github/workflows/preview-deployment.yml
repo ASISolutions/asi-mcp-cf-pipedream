@@ -33,7 +33,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --name asi-mcp-pr-${{ github.event.number }} --compatibility-date 2025-08-24
+          command: deploy --name asi-mcp-pr-${{ github.event.number }}
         env:
           # Inherit all secrets for preview deployment
           ACCESS_CLIENT_ID: ${{ secrets.ACCESS_CLIENT_ID }}
