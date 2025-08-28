@@ -42,8 +42,8 @@ export interface Env {
 	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
 	
 	// GitHub SOP Documentation configuration
-	GITHUB_SOP_OWNER?: string; // SOP docs repository owner (defaults to "asi-solutions")
-	GITHUB_SOP_REPO?: string; // SOP docs repository name (defaults to "sop-docs")
+	GITHUB_SOP_OWNER?: string; // SOP docs repository owner (defaults to "ASISolutions")
+	GITHUB_SOP_REPO?: string; // SOP docs repository name (defaults to "docs")
 	GITHUB_SOP_BRANCH?: string; // SOP docs branch (defaults to "main")
 
 	// System app API keys / secrets
@@ -1406,8 +1406,8 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						};
 					}
 
-					const sopOwner = this.env.GITHUB_SOP_OWNER || "asi-solutions";
-					const sopRepo = this.env.GITHUB_SOP_REPO || "sop-docs";
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
 					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
 
 					try {
@@ -1448,7 +1448,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 							owner: result.metadata.owner,
 							last_modified: result.metadata.last_modified,
 							...(include_content && { content: result.content }),
-							gitbook_url: `https://asi-solutions.gitbook.io/sop-docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '').replace('docs/', '')}`,
 						}));
 
 						return {
@@ -1509,8 +1509,8 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						};
 					}
 
-					const sopOwner = this.env.GITHUB_SOP_OWNER || "asi-solutions";
-					const sopRepo = this.env.GITHUB_SOP_REPO || "sop-docs";
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
 					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
 
 					try {
@@ -1541,7 +1541,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 										path: result.path,
 										metadata: result.metadata,
 										content: result.content,
-										gitbook_url: `https://asi-solutions.gitbook.io/sop-docs/${result.path.replace('.md', '').replace('docs/', '')}`,
+										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '').replace('docs/', '')}`,
 										repository: `${sopOwner}/${sopRepo}`,
 									}),
 								},
