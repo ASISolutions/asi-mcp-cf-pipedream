@@ -9,6 +9,7 @@ A production-ready remote MCP (Model Context Protocol) server that runs on Cloud
 - **Multi-App OAuth**: Uses Pipedream Connect to manage HubSpot, Xero, and PandaDoc connections
 - **Intelligent Routing**: Auto-detects destination app from URLs and injects correct tokens
 - **Xero Tenant Handling**: Automatically manages Xero tenant IDs with caching
+- **Preview Deployments**: Automatic PR preview environments for testing changes
 
 ## MCP Tools
 
