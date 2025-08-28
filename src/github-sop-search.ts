@@ -97,7 +97,11 @@ export class SOPSearchService {
 		const searchQuery = this.buildSearchQuery(userQuery, options);
 		
 		try {
-			const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&sort=indexed&per_page=${options.limit || 5}`, {
+			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&sort=indexed&per_page=${options.limit || 5}`;
+			console.log(`GitHub search URL: ${searchUrl}`);
+			console.log(`GitHub search query: ${searchQuery}`);
+			
+			const response = await fetch(searchUrl, {
 				headers: {
 					'Authorization': `Bearer ${this.githubToken}`,
 					'Accept': 'application/vnd.github+json',
@@ -107,10 +111,13 @@ export class SOPSearchService {
 			});
 
 			if (!response.ok) {
-				throw new Error(`GitHub search failed: ${response.status}`);
+				const errorText = await response.text();
+				console.error(`GitHub search failed: ${response.status} - ${errorText}`);
+				throw new Error(`GitHub search failed: ${response.status} - ${errorText}`);
 			}
 
-			const data = await response.json() as { items: Array<{ path: string }> };
+			const data = await response.json() as { items: Array<{ path: string }>, total_count: number };
+			console.log(`GitHub search returned ${data.total_count} total results, ${data.items.length} items`);
 			
 			// Fetch full content for each result
 			const results = await Promise.allSettled(
@@ -185,9 +192,13 @@ export class SOPSearchService {
 	 */
 	async getByProcessCode(processCode: string): Promise<SOPSearchResult | null> {
 		const searchQuery = `repo:${this.owner}/${this.repo} process_code:${processCode} extension:md`;
+		console.log(`Process code search query: ${searchQuery}`);
 		
 		try {
-			const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&per_page=1`, {
+			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&per_page=1`;
+			console.log(`Process code search URL: ${searchUrl}`);
+			
+			const response = await fetch(searchUrl, {
 				headers: {
 					'Authorization': `Bearer ${this.githubToken}`,
 					'Accept': 'application/vnd.github+json',
@@ -200,9 +211,11 @@ export class SOPSearchService {
 				throw new Error(`GitHub search failed: ${response.status}`);
 			}
 
-			const data = await response.json() as { items: Array<{ path: string }> };
+			const data = await response.json() as { items: Array<{ path: string }>, total_count: number };
+			console.log(`Process code search returned ${data.total_count} total results, ${data.items.length} items`);
 			
 			if (data.items.length > 0) {
+				console.log(`Found process code in file: ${data.items[0].path}`);
 				return await this.fetchDocument(data.items[0].path, true);
 			}
 			return null;
