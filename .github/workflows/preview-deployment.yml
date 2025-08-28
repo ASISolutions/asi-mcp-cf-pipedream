@@ -19,7 +19,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
           cache: 'npm'
           
       - name: Install dependencies
@@ -33,7 +33,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: deploy --name asi-mcp-pr-${{ github.event.number }}
+          command: deploy --config wrangler.jsonc --name asi-mcp-pr-${{ github.event.number }}
         env:
           # Inherit all secrets for preview deployment
           ACCESS_CLIENT_ID: ${{ secrets.ACCESS_CLIENT_ID }}
