@@ -7,6 +7,7 @@ import { z } from "zod";
 import AccessDefaultHandler from "./access-handler";
 import type { Props } from "./workers-oauth-utils";
 import { SOPSearchService } from "./github-sop-search";
+import { DickerDataAuth } from "./dicker-data-auth";
 
 // ---- Environment Types ----
 export interface Env {
@@ -40,7 +41,7 @@ export interface Env {
 	GITHUB_TOKEN: string; // GitHub Personal Access Token with repo:issues
 	GITHUB_REPO: string; // "owner/repo"
 	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
-	
+
 	// GitHub SOP Documentation configuration
 	GITHUB_SOP_OWNER?: string; // SOP docs repository owner (defaults to "ASISolutions")
 	GITHUB_SOP_REPO?: string; // SOP docs repository name (defaults to "docs")
@@ -48,6 +49,11 @@ export interface Env {
 
 	// System app API keys / secrets
 	GAMMA_API_KEY?: string;
+
+	// Dicker Data credentials
+	DICKER_DATA_ACCOUNT?: string;
+	DICKER_DATA_USERNAME?: string;
+	DICKER_DATA_PASSWORD?: string;
 
 	// Sentry configuration
 	SENTRY_DSN: string;
@@ -166,7 +172,9 @@ interface AppSearchResult {
 	is_dynamic: boolean;
 }
 
-let IN_MEMORY_APPS_SEARCH: { expiresAt: number; data: AppSearchResult[] } | undefined;
+let IN_MEMORY_APPS_SEARCH:
+	| { expiresAt: number; data: AppSearchResult[] }
+	| undefined;
 
 /**
  * Enhanced search function with caching and comprehensive filtering
@@ -180,7 +188,7 @@ async function searchAppsWithCache(
 	// In-memory cache (best-effort; may be evicted across cold starts)
 	const now = Date.now();
 	let allApps: AppSearchResult[] | undefined;
-	
+
 	if (IN_MEMORY_APPS_SEARCH && IN_MEMORY_APPS_SEARCH.expiresAt > now) {
 		allApps = IN_MEMORY_APPS_SEARCH.data;
 	} else {
@@ -249,7 +257,9 @@ async function searchAppsWithCache(
 					);
 				} catch {}
 			} catch (error) {
-				throw new Error(`Failed to fetch apps: ${error instanceof Error ? error.message : 'Unknown error'}`);
+				throw new Error(
+					`Failed to fetch apps: ${error instanceof Error ? error.message : "Unknown error"}`,
+				);
 			}
 		}
 	}
@@ -258,22 +268,28 @@ async function searchAppsWithCache(
 	let filteredApps = allApps;
 	if (query && query.trim() !== "") {
 		const searchTerm = query.toLowerCase().trim();
-		filteredApps = allApps.filter(app => {
+		filteredApps = allApps.filter((app) => {
 			// Search in app slug
 			if (app.name_slug.toLowerCase().includes(searchTerm)) return true;
-			
+
 			// Search in display name
 			if (app.name && app.name.toLowerCase().includes(searchTerm)) return true;
-			
+
 			// Search in description
-			if (app.description && app.description.toLowerCase().includes(searchTerm)) return true;
-			
+			if (app.description && app.description.toLowerCase().includes(searchTerm))
+				return true;
+
 			// Search in categories
-			if (app.categories && app.categories.some(cat => cat.toLowerCase().includes(searchTerm))) return true;
-			
+			if (
+				app.categories &&
+				app.categories.some((cat) => cat.toLowerCase().includes(searchTerm))
+			)
+				return true;
+
 			// Search in allowed domains (for user convenience)
-			if (app.allowed_domains.some(domain => domain.includes(searchTerm))) return true;
-			
+			if (app.allowed_domains.some((domain) => domain.includes(searchTerm)))
+				return true;
+
 			return false;
 		});
 	}
@@ -326,11 +342,16 @@ function resolveAppFromFullUrl(
 }
 
 // ---- System Apps (direct auth) ----
-type SystemAppAuth = {
-	type: "api_key_header";
-	header: string;
-	valueEnv: string; // Name of Env field holding the secret
-};
+type SystemAppAuth =
+	| {
+			type: "api_key_header";
+			header: string;
+			valueEnv: string; // Name of Env field holding the secret
+	  }
+	| {
+			type: "session_cookie";
+			// Cookie authentication handled by DickerDataAuth class
+	  };
 
 interface SystemAppConfigEntry {
 	appSlug: string;
@@ -355,7 +376,21 @@ function getSystemAppsConfig(env: Env): SystemAppsConfig {
 		},
 		defaultHeaders: { Accept: "application/json" },
 	};
-	return [gamma];
+
+	const dickerData: SystemAppConfigEntry = {
+		appSlug: "dicker_data",
+		allowedDomains: ["portal.dickerdata.co.nz"],
+		baseUrl: "https://portal.dickerdata.co.nz",
+		auth: {
+			type: "session_cookie",
+		},
+		defaultHeaders: { 
+			"Accept": "application/json, text/plain, */*",
+			"Content-Type": "application/json"
+		},
+	};
+
+	return [gamma, dickerData];
 }
 
 function resolveSystemAppFromFullUrl(
@@ -448,6 +483,37 @@ async function directSystemRequest(
 			headers[params.app.auth.header] = secret;
 			break;
 		}
+		case "session_cookie": {
+			if (params.app.appSlug === "dicker_data") {
+				try {
+					const dickerAuth = new DickerDataAuth(env);
+					const cookieString = await dickerAuth.refreshSessionIfNeeded();
+					headers["Cookie"] = cookieString;
+
+					// Add additional headers that Dicker Data expects
+					headers["User-Agent"] =
+						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+					headers["X-Requested-With"] = "XMLHttpRequest";
+					headers["Referer"] = "https://portal.dickerdata.co.nz/";
+					
+					// Override default Accept header with Dicker Data specific format
+					if (!headers["Accept"] || headers["Accept"] === "application/json") {
+						headers["Accept"] = "application/json, text/plain, */*";
+					}
+				} catch (error) {
+					console.error("Dicker Data authentication failed:", error);
+					return {
+						status: 500,
+						data: {
+							error: "dicker_data_auth_failed",
+							message: `Failed to authenticate with Dicker Data: ${error instanceof Error ? error.message : "Unknown error"}`,
+							app: params.app.appSlug,
+						},
+					};
+				}
+			}
+			break;
+		}
 	}
 
 	if (!headers["Accept"]) headers["Accept"] = "application/json";
@@ -457,29 +523,102 @@ async function directSystemRequest(
 	// Body handling
 	let bodyToSend: BodyInit | null = null;
 	if (params.body !== undefined) {
-		if (typeof params.body === "string") {
-			bodyToSend = params.body as string;
+		// Transform payload for Dicker Data API compatibility
+		let processedBody = params.body;
+		if (params.app.appSlug === "dicker_data" && typeof params.body === "object" && params.body !== null) {
+			const body = params.body as Record<string, any>;
+			
+			// Transform user-friendly searchTerm to Dicker Data API format
+			if ("searchTerm" in body) {
+				processedBody = {
+					searchKeyword: body.searchTerm,
+					brand: body.brand || "",
+					type: body.type || "",
+					category: body.category || "",
+					series: body.series || "",
+					minPrice: body.minPrice ? String(body.minPrice) : "",
+					maxPrice: body.maxPrice ? String(body.maxPrice) : "",
+					excludeKits: body.excludeKits || false,
+					minSOH: body.minSOH ? String(body.minSOH) : ""
+				};
+			}
+		}
+		
+		if (typeof processedBody === "string") {
+			bodyToSend = processedBody as string;
 			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
 		} else {
-			bodyToSend = JSON.stringify(params.body);
+			bodyToSend = JSON.stringify(processedBody);
 			if (!headers["Content-Type"])
 				headers["Content-Type"] = "application/json";
 		}
 	}
 
-	const resp = await fetch(finalUrl, {
-		method: params.method,
-		headers,
-		body: bodyToSend,
-	});
-	const text = await resp.text();
-	let data: any;
-	try {
-		data = JSON.parse(text);
-	} catch {
-		data = text;
+	// Execute request with retry logic for session cookie auth
+	const executeRequest = async (
+		requestHeaders: Record<string, string>,
+	): Promise<{ status: number; data: any }> => {
+		const resp = await fetch(finalUrl, {
+			method: params.method,
+			headers: requestHeaders,
+			body: bodyToSend,
+		});
+		const text = await resp.text();
+		let data: any;
+		try {
+			data = JSON.parse(text);
+		} catch {
+			data = text;
+		}
+		return { status: resp.status, data };
+	};
+
+	// First attempt
+	let result = await executeRequest(headers);
+
+	// Retry logic for session cookie authentication failures
+	if (
+		params.app.auth.type === "session_cookie" &&
+		params.app.appSlug === "dicker_data" &&
+		(result.status === 401 ||
+			result.status === 403 ||
+			(result.status === 302 &&
+				typeof result.data === "string" &&
+				result.data.includes("Login")))
+	) {
+		console.log(
+			"🔄 Dicker Data session appears expired, attempting fresh authentication",
+		);
+
+		try {
+			// Force a fresh login
+			const dickerAuth = new DickerDataAuth(env);
+			const freshCookieString = await dickerAuth.getValidSession();
+
+			// Update headers with fresh cookies
+			const freshHeaders = { ...headers };
+			freshHeaders["Cookie"] = freshCookieString;
+
+			// Retry the request
+			console.log("🔄 Retrying request with fresh Dicker Data session");
+			result = await executeRequest(freshHeaders);
+		} catch (retryError) {
+			console.error(
+				"Failed to retry with fresh Dicker Data session:",
+				retryError,
+			);
+			return {
+				status: 500,
+				data: {
+					error: "dicker_data_retry_failed",
+					message: `Authentication retry failed: ${retryError instanceof Error ? retryError.message : "Unknown error"}`,
+					original_status: result.status,
+				},
+			};
+		}
 	}
-	return { status: resp.status, data };
+
+	return result;
 }
 
 // ---- Pipedream Connect helpers ----
@@ -814,7 +953,10 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 									content: [
 										{
 											type: "text",
-											text: JSON.stringify({ error: "internal_error", eventId }),
+											text: JSON.stringify({
+												error: "internal_error",
+												eventId,
+											}),
 										},
 									],
 								};
@@ -822,11 +964,14 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 						},
 					);
 				} catch (sentryError) {
-					console.warn(`Sentry span creation failed, falling back to direct execution:`, sentryError);
+					console.warn(
+						`Sentry span creation failed, falling back to direct execution:`,
+						sentryError,
+					);
 					// Fallback to direct execution without Sentry
 				}
 			}
-			
+
 			// Direct execution fallback (when Sentry is unavailable or disabled)
 			try {
 				const result = await handler(args);
@@ -837,8 +982,11 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				return {
 					content: [
 						{
-							type: "text", 
-							text: JSON.stringify({ error: "internal_error", eventId: "sentry_unavailable" })
+							type: "text",
+							text: JSON.stringify({
+								error: "internal_error",
+								eventId: "sentry_unavailable",
+							}),
 						},
 					],
 				};
@@ -854,7 +1002,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			async () => {
 				const external_user_id = this.getExternalUserId();
 				const pdToken = await getPdAccessToken(this.env);
-				
+
 				// Get currently connected apps for this user
 				const res = await listAccountsForUser(
 					this.env,
@@ -880,9 +1028,15 @@ If the user needs to connect to an app, use the app slug from the SOP. If it's n
 
 ## Currently Connected Apps
 
-${connectedApps.length > 0 
-	? connectedApps.map(app => `- **${app.app}** (${app.healthy ? 'healthy' : app.dead ? 'dead' : 'unknown status'}) - Account ID: ${app.account_id}`).join('\n')
-	: '- No apps currently connected'
+${
+	connectedApps.length > 0
+		? connectedApps
+				.map(
+					(app) =>
+						`- **${app.app}** (${app.healthy ? "healthy" : app.dead ? "dead" : "unknown status"}) - Account ID: ${app.account_id}`,
+				)
+				.join("\n")
+		: "- No apps currently connected"
 }
 
 ## Key Steps for Task Execution
@@ -1161,40 +1315,40 @@ ${connectedApps.length > 0
 							Authorization: `Bearer ${pdToken}`,
 						},
 					});
-					if (!res.ok) throw new Error(`Pipedream apps search error ${res.status}`);
+					if (!res.ok)
+						throw new Error(`Pipedream apps search error ${res.status}`);
 					const body = (await res.json()) as { data?: PdAppInfo[] };
 					let allApps = body.data || [];
 
 					// Apply additional client-side filters for parameters not supported by API
 					let filteredApps = allApps;
-
 					if (name) {
 						const nameLower = name.toLowerCase();
-						filteredApps = filteredApps.filter(app =>
-							app.name?.toLowerCase().includes(nameLower)
+						filteredApps = filteredApps.filter((app) =>
+							app.name?.toLowerCase().includes(nameLower),
 						);
 					}
 
 					if (slug) {
 						const slugLower = slug.toLowerCase();
-						filteredApps = filteredApps.filter(app =>
-							app.name_slug?.toLowerCase().includes(slugLower)
+						filteredApps = filteredApps.filter((app) =>
+							app.name_slug?.toLowerCase().includes(slugLower),
 						);
 					}
 
 					if (description) {
 						const descLower = description.toLowerCase();
-						filteredApps = filteredApps.filter(app =>
-							app.description?.toLowerCase().includes(descLower)
+						filteredApps = filteredApps.filter((app) =>
+							app.description?.toLowerCase().includes(descLower),
 						);
 					}
 
 					if (domain) {
 						const domainLower = domain.toLowerCase();
-						filteredApps = filteredApps.filter(app =>
-							app.connect?.allowed_domains?.some(d => 
-								d.toLowerCase().includes(domainLower)
-							)
+						filteredApps = filteredApps.filter((app) =>
+							app.connect?.allowed_domains?.some((d) =>
+								d.toLowerCase().includes(domainLower),
+							),
 						);
 					}
 
@@ -1213,14 +1367,16 @@ ${connectedApps.length > 0
 					const results = filteredApps.slice(0, limit);
 
 					// Format results for response
-					const formattedResults = results.map(app => ({
+					const formattedResults = results.map((app) => ({
 						name_slug: app.name_slug,
 						name: app.name,
 						description: app.description,
 						connect_enabled: !!app.connect?.proxy_enabled,
 						allowed_domains: app.connect?.allowed_domains || [],
 						base_url: app.connect?.base_proxy_target_url,
-						is_dynamic: /\{\{[^}]+\}\}/.test(app.connect?.base_proxy_target_url || ""),
+						is_dynamic: /\{\{[^}]+\}\}/.test(
+							app.connect?.base_proxy_target_url || "",
+						),
 					}));
 
 					return {
@@ -1248,13 +1404,34 @@ ${connectedApps.length > 0
 		this.server.tool(
 			"asi_magic_tool",
 			{
-				method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).describe("HTTP method for the API request"),
-				url: z.string().describe("API endpoint URL. CRITICAL: Before using this tool, ALWAYS search for and review relevant SOPs using search_sop_docs to ensure you follow proper procedures and understand the correct API usage patterns."),
-				headers: z.record(z.string()).optional().describe("Custom HTTP headers for the request"),
-				body: z.union([z.string(), z.record(z.any())]).optional().describe("Request body data (JSON object or string)"),
-				account_id: z.string().optional().describe("Specific account ID to use for authentication"),
-				app: z.string().optional().describe("App slug to use (e.g., 'xero_accounting_api', 'hubspot')"),
-				provider: z.enum(["system", "pipedream"]).optional().describe("Force specific provider (system or pipedream)"),
+				method: z
+					.enum(["GET", "POST", "PUT", "PATCH", "DELETE"])
+					.describe("HTTP method for the API request"),
+				url: z
+					.string()
+					.describe(
+						"API endpoint URL. CRITICAL: Before using this tool, ALWAYS search for and review relevant SOPs using search_sop_docs to ensure you follow proper procedures and understand the correct API usage patterns.",
+					),
+				headers: z
+					.record(z.string())
+					.optional()
+					.describe("Custom HTTP headers for the request"),
+				body: z
+					.union([z.string(), z.record(z.any())])
+					.optional()
+					.describe("Request body data (JSON object or string)"),
+				account_id: z
+					.string()
+					.optional()
+					.describe("Specific account ID to use for authentication"),
+				app: z
+					.string()
+					.optional()
+					.describe("App slug to use (e.g., 'xero_accounting_api', 'hubspot')"),
+				provider: z
+					.enum(["system", "pipedream"])
+					.optional()
+					.describe("Force specific provider (system or pipedream)"),
 			},
 			this.withSentryInstrumentation(
 				"asi_magic_tool",
@@ -1502,12 +1679,12 @@ ${connectedApps.length > 0
 
 					// Process headers for Pipedream Connect proxy
 					// Pipedream Connect proxy only forwards headers with x-pd-proxy- prefix
-					let processedHeaders: Record<string, string> | undefined ;
+					let processedHeaders: Record<string, string> | undefined;
 					if (headers) {
 						processedHeaders = {};
 						for (const [key, value] of Object.entries(headers)) {
 							// Add x-pd-proxy- prefix to all custom headers so they get forwarded
-							if (!key.toLowerCase().startsWith('x-pd-proxy-')) {
+							if (!key.toLowerCase().startsWith("x-pd-proxy-")) {
 								processedHeaders[`x-pd-proxy-${key}`] = value;
 							} else {
 								// Already has prefix, keep as-is
@@ -1542,7 +1719,9 @@ ${connectedApps.length > 0
 									data: {
 										status: resp.status,
 										app: resolvedApp,
-										host: isFullUrl ? new URL(url).hostname : "api.pipedream.com",
+										host: isFullUrl
+											? new URL(url).hostname
+											: "api.pipedream.com",
 									},
 								});
 							}
@@ -1571,7 +1750,10 @@ ${connectedApps.length > 0
 								executeProxyRequest,
 							);
 						} catch (sentryError) {
-							console.warn(`Sentry HTTP span failed, falling back to direct execution:`, sentryError);
+							console.warn(
+								`Sentry HTTP span failed, falling back to direct execution:`,
+								sentryError,
+							);
 							result = await executeProxyRequest();
 						}
 					} else {
@@ -1711,11 +1893,41 @@ ${connectedApps.length > 0
 		this.server.tool(
 			"search_sop_docs",
 			{
-				query: z.string().min(1).max(200).describe("Search query for SOP documentation. CRITICAL: Always search for and review relevant SOPs before using the ASI Magic Tool (asi_magic_tool) to ensure proper procedures are followed."),
-				search_type: z.enum(['process', 'quick', 'system', 'sales', 'finance', 'operations', 'support']).optional().describe("Type of SOP to search for"),
-				system: z.string().optional().describe("Specific system name to search SOPs for (e.g., 'xero', 'hubspot')"),
-				limit: z.number().min(1).max(20).optional().describe("Maximum number of results to return"),
-				include_content: z.boolean().optional().describe("Whether to include full SOP content in results"),
+				query: z
+					.string()
+					.min(1)
+					.max(200)
+					.describe(
+						"Search query for SOP documentation. CRITICAL: Always search for and review relevant SOPs before using the ASI Magic Tool (asi_magic_tool) to ensure proper procedures are followed.",
+					),
+				search_type: z
+					.enum([
+						"process",
+						"quick",
+						"system",
+						"sales",
+						"finance",
+						"operations",
+						"support",
+					])
+					.optional()
+					.describe("Type of SOP to search for"),
+				system: z
+					.string()
+					.optional()
+					.describe(
+						"Specific system name to search SOPs for (e.g., 'xero', 'hubspot')",
+					),
+				limit: z
+					.number()
+					.min(1)
+					.max(20)
+					.optional()
+					.describe("Maximum number of results to return"),
+				include_content: z
+					.boolean()
+					.optional()
+					.describe("Whether to include full SOP content in results"),
 			},
 			this.withSentryInstrumentation(
 				"search_sop_docs",
@@ -1728,16 +1940,29 @@ ${connectedApps.length > 0
 					include_content,
 				}: {
 					query: string;
-					search_type?: 'process' | 'quick' | 'system' | 'sales' | 'finance' | 'operations' | 'support';
+					search_type?:
+						| "process"
+						| "quick"
+						| "system"
+						| "sales"
+						| "finance"
+						| "operations"
+						| "support";
 					system?: string;
 					limit?: number;
 					include_content?: boolean;
 				}) => {
-					console.log(`🔍 SOP search called with:`, { query, search_type, system, limit, include_content });
-					
+					console.log(`🔍 SOP search called with:`, {
+						query,
+						search_type,
+						system,
+						limit,
+						include_content,
+					});
+
 					const token = this.env.GITHUB_TOKEN;
 					console.log(`🔑 GitHub token present: ${!!token}`);
-					
+
 					if (!token) {
 						console.error("❌ GitHub token missing");
 						return {
@@ -1746,7 +1971,8 @@ ${connectedApps.length > 0
 									type: "text",
 									text: JSON.stringify({
 										error: "github_not_configured",
-										message: "GitHub token not configured for SOP documentation search",
+										message:
+											"GitHub token not configured for SOP documentation search",
 									}),
 								},
 							],
@@ -1756,11 +1982,18 @@ ${connectedApps.length > 0
 					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
 					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
 					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
-					
-					console.log(`📚 Using repository: ${sopOwner}/${sopRepo} (branch: ${sopBranch})`);
+
+					console.log(
+						`📚 Using repository: ${sopOwner}/${sopRepo} (branch: ${sopBranch})`,
+					);
 
 					try {
-						const sopService = new SOPSearchService(token, sopOwner, sopRepo, sopBranch);
+						const sopService = new SOPSearchService(
+							token,
+							sopOwner,
+							sopRepo,
+							sopBranch,
+						);
 						console.log(`🚀 Starting search...`);
 						const results = await sopService.search(query, {
 							searchType: search_type,
@@ -1780,7 +2013,8 @@ ${connectedApps.length > 0
 											query,
 											results: [],
 											total_results: 0,
-											message: "No matching SOP documents found. Try different search terms or check if the repository exists.",
+											message:
+												"No matching SOP documents found. Try different search terms or check if the repository exists.",
 										}),
 									},
 								],
@@ -1788,20 +2022,21 @@ ${connectedApps.length > 0
 						}
 
 						// Format results for response
-						const formattedResults = results.map(result => ({
+						const formattedResults = results.map((result) => ({
 							path: result.path,
 							process_code: result.metadata.process_code,
 							title: result.metadata.title,
 							description: result.metadata.description,
 							category: result.metadata.category,
-							systems: result.metadata.systems ? Object.keys(result.metadata.systems) : undefined,
+							systems: result.metadata.systems
+								? Object.keys(result.metadata.systems)
+								: undefined,
 							estimated_time: result.metadata.estimated_time,
 							requires_approval: result.metadata.requires_approval,
 							owner: result.metadata.owner,
 							last_modified: result.metadata.last_modified,
 							...(include_content && { content: result.content }),
-							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '')}`,
-
+							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace(".md", "")}`,
 						}));
 
 						return {
@@ -1827,7 +2062,7 @@ ${connectedApps.length > 0
 									type: "text",
 									text: JSON.stringify({
 										error: "search_failed",
-										message: `SOP documentation search failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+										message: `SOP documentation search failed: ${error instanceof Error ? error.message : "Unknown error"}`,
 										query,
 									}),
 								},
@@ -1842,14 +2077,19 @@ ${connectedApps.length > 0
 		this.server.tool(
 			"get_sop_process",
 			{
-				process_code: z.string().regex(/^[A-Z]+-\d{3}$/, "Process code must be in format CATEGORY-001"),
+				process_code: z
+					.string()
+					.regex(
+						/^[A-Z]+-\d{3}$/,
+						"Process code must be in format CATEGORY-001",
+					),
 			},
 			this.withSentryInstrumentation(
 				"get_sop_process",
 				() => undefined,
 				async ({ process_code }: { process_code: string }) => {
 					console.log(`🎯 Process lookup called for: ${process_code}`);
-					
+
 					const token = this.env.GITHUB_TOKEN;
 					if (!token) {
 						console.error("❌ GitHub token missing for process lookup");
@@ -1859,7 +2099,8 @@ ${connectedApps.length > 0
 									type: "text",
 									text: JSON.stringify({
 										error: "github_not_configured",
-										message: "GitHub token not configured for SOP documentation access",
+										message:
+											"GitHub token not configured for SOP documentation access",
 									}),
 								},
 							],
@@ -1871,7 +2112,12 @@ ${connectedApps.length > 0
 					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
 
 					try {
-						const sopService = new SOPSearchService(token, sopOwner, sopRepo, sopBranch);
+						const sopService = new SOPSearchService(
+							token,
+							sopOwner,
+							sopRepo,
+							sopBranch,
+						);
 						const result = await sopService.getByProcessCode(process_code);
 
 						if (!result) {
@@ -1900,7 +2146,7 @@ ${connectedApps.length > 0
 										path: result.path,
 										metadata: result.metadata,
 										content: result.content,
-										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace('.md', '')}`,
+										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace(".md", "")}`,
 
 										repository: `${sopOwner}/${sopRepo}`,
 									}),
@@ -1915,7 +2161,7 @@ ${connectedApps.length > 0
 									type: "text",
 									text: JSON.stringify({
 										error: "process_fetch_failed",
-										message: `Failed to fetch process ${process_code}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+										message: `Failed to fetch process ${process_code}: ${error instanceof Error ? error.message : "Unknown error"}`,
 										process_code,
 									}),
 								},
@@ -1968,14 +2214,14 @@ const provider = new OAuthProvider({
 });
 
 // Helper to safely wrap with Sentry or fallback gracefully
-function createSentryWrappedHandler(
-	provider: unknown,
-): ExportedHandler<Env> {
+function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
 	return {
 		fetch: async (request, env, ctx) => {
 			// Check if Sentry should be enabled
 			if (!env.SENTRY_DSN) {
-				console.log("Sentry DSN not configured, running without Sentry monitoring");
+				console.log(
+					"Sentry DSN not configured, running without Sentry monitoring",
+				);
 				return (provider as any).fetch(request, env, ctx);
 			}
 
@@ -1990,7 +2236,7 @@ function createSentryWrappedHandler(
 							release: versionId,
 							// capture headers/IP (you can set this false if you prefer)
 							sendDefaultPii: true,
-							// Logs: forwards console.* to Sentry Logs  
+							// Logs: forwards console.* to Sentry Logs
 							enableLogs: true,
 							// Tracing: 100% since volume is low (tune later)
 							tracesSampleRate: 1.0,
@@ -2005,7 +2251,10 @@ function createSentryWrappedHandler(
 				}
 				throw new Error("Sentry wrapper did not return expected handler");
 			} catch (sentryError) {
-				console.error("Sentry initialization failed, falling back to direct execution:", sentryError);
+				console.error(
+					"Sentry initialization failed, falling back to direct execution:",
+					sentryError,
+				);
 				// Fallback to direct provider execution
 				return (provider as any).fetch(request, env, ctx);
 			}
