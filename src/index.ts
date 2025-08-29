@@ -385,7 +385,10 @@ function getSystemAppsConfig(env: Env): SystemAppsConfig {
 		auth: {
 			type: "session_cookie",
 		},
-		defaultHeaders: { Accept: "application/json" },
+		defaultHeaders: {
+			Accept: "application/json, text/plain, */*",
+			"Content-Type": "application/json",
+		},
 	};
 
 	return [gamma, dickerData];
@@ -491,6 +494,13 @@ async function directSystemRequest(
 					// Add additional headers that Dicker Data expects
 					headers["User-Agent"] =
 						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+					headers["X-Requested-With"] = "XMLHttpRequest";
+					headers["Referer"] = "https://portal.dickerdata.co.nz/";
+
+					// Override default Accept header with Dicker Data specific format
+					if (!headers["Accept"] || headers["Accept"] === "application/json") {
+						headers["Accept"] = "application/json, text/plain, */*";
+					}
 				} catch (error) {
 					console.error("Dicker Data authentication failed:", error);
 					return {
