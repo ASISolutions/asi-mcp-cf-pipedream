@@ -62,6 +62,8 @@ export interface Env {
 // ---- Dynamic Pipedream Apps cache (for host->app detection) ----
 interface PdAppInfo {
 	name_slug: string;
+	name?: string;
+	description?: string;
 	connect?: {
 		proxy_enabled?: boolean;
 		allowed_domains?: string[];
@@ -909,6 +911,137 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 							{
 								type: "text",
 								text: JSON.stringify(index),
+							},
+						],
+					};
+				},
+			),
+		);
+
+		// -------- search_apps --------
+		this.server.tool(
+			"search_apps",
+			{
+				query: z.string().min(1).max(200).optional(),
+				name: z.string().min(1).max(100).optional(),
+				slug: z.string().min(1).max(100).optional(),
+				description: z.string().min(1).max(200).optional(),
+				domain: z.string().min(1).max(100).optional(),
+				limit: z.number().min(1).max(50).optional(),
+			},
+			this.withSentryInstrumentation(
+				"search_apps",
+				() => undefined, // no single app
+				async ({
+					query,
+					name,
+					slug,
+					description,
+					domain,
+					limit = 10,
+				}: {
+					query?: string;
+					name?: string;
+					slug?: string;
+					description?: string;
+					domain?: string;
+					limit?: number;
+				}) => {
+					const pdToken = await getPdAccessToken(this.env);
+					
+					// Fetch all available apps from Pipedream
+					const res = await fetch("https://api.pipedream.com/v1/apps", {
+						headers: {
+							Authorization: `Bearer ${pdToken}`,
+							"x-pd-environment": this.env.PIPEDREAM_ENV,
+						},
+					});
+					if (!res.ok) throw new Error(`Pipedream apps search error ${res.status}`);
+					const body = (await res.json()) as { data?: PdAppInfo[] };
+					const allApps = body.data || [];
+
+					let filteredApps = allApps;
+
+					// Apply filters based on provided parameters
+					if (query) {
+						const queryLower = query.toLowerCase();
+						filteredApps = filteredApps.filter(app => 
+							app.name?.toLowerCase().includes(queryLower) ||
+							app.name_slug?.toLowerCase().includes(queryLower) ||
+							app.description?.toLowerCase().includes(queryLower) ||
+							app.connect?.allowed_domains?.some(domain => 
+								domain.toLowerCase().includes(queryLower)
+							)
+						);
+					}
+
+					if (name) {
+						const nameLower = name.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.name?.toLowerCase().includes(nameLower)
+						);
+					}
+
+					if (slug) {
+						const slugLower = slug.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.name_slug?.toLowerCase().includes(slugLower)
+						);
+					}
+
+					if (description) {
+						const descLower = description.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.description?.toLowerCase().includes(descLower)
+						);
+					}
+
+					if (domain) {
+						const domainLower = domain.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.connect?.allowed_domains?.some(d => 
+								d.toLowerCase().includes(domainLower)
+							)
+						);
+					}
+
+					// Sort by relevance (exact matches first, then alphabetical)
+					filteredApps.sort((a, b) => {
+						if (query) {
+							const aExact = a.name_slug.toLowerCase() === query.toLowerCase();
+							const bExact = b.name_slug.toLowerCase() === query.toLowerCase();
+							if (aExact && !bExact) return -1;
+							if (!aExact && bExact) return 1;
+						}
+						return (a.name || a.name_slug).localeCompare(b.name || b.name_slug);
+					});
+
+					// Apply limit
+					const results = filteredApps.slice(0, limit);
+
+					// Format results for response
+					const formattedResults = results.map(app => ({
+						name_slug: app.name_slug,
+						name: app.name,
+						description: app.description,
+						connect_enabled: !!app.connect?.proxy_enabled,
+						allowed_domains: app.connect?.allowed_domains || [],
+						base_url: app.connect?.base_proxy_target_url,
+						is_dynamic: /\{\{[^}]+\}\}/.test(app.connect?.base_proxy_target_url || ""),
+					}));
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									query,
+									filters: { name, slug, description, domain },
+									results: formattedResults,
+									total_results: formattedResults.length,
+									total_available: allApps.length,
+									environment: this.env.PIPEDREAM_ENV,
+								}),
 							},
 						],
 					};
