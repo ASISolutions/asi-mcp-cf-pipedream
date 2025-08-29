@@ -115,8 +115,8 @@ async function fetchProxyEnabledApps(
 		}
 	} catch {}
 
-	// Fetch from Pipedream Connect API to get all available apps
-	const res = await fetch("https://api.pipedream.com/v1/connect/apps", {
+	// Fetch from Pipedream REST API
+	const res = await fetch("https://api.pipedream.com/v1/apps", {
 		headers: {
 			Authorization: `Bearer ${pdToken}`,
 			"x-pd-environment": env.PIPEDREAM_ENV,
@@ -209,12 +209,11 @@ async function searchAppsWithCache(
 		} catch {}
 
 		if (!allApps) {
-			// Fetch from Pipedream Connect API to get all available apps (not just project-specific)
+			// Fetch from Pipedream REST API with error handling
 			try {
-				const res = await fetch("https://api.pipedream.com/v1/connect/apps", {
+				const res = await fetch("https://api.pipedream.com/v1/apps", {
 					headers: {
 						Authorization: `Bearer ${pdToken}`,
-						"x-pd-environment": env.PIPEDREAM_ENV,
 					},
 				});
 				if (!res.ok) throw new Error(`Pipedream apps API error ${res.status}`);
@@ -1295,35 +1294,34 @@ ${
 					limit?: number;
 				}) => {
 					const pdToken = await getPdAccessToken(this.env);
-
-					// Fetch all available apps from Pipedream Connect (not just project-specific apps)
-					const res = await fetch("https://api.pipedream.com/v1/connect/apps", {
+					
+					// Build URL with query parameters per Pipedream API docs
+					let url = "https://api.pipedream.com/v1/apps";
+					const params = new URLSearchParams();
+					
+					// Use the 'q' parameter for general search as per API docs
+					if (query) {
+						params.set("q", query);
+					}
+					
+					if (params.toString()) {
+						url += "?" + params.toString();
+					}
+					
+					// Fetch apps from Pipedream with query parameters
+					// Note: x-pd-environment header causes "record not found" - remove it for global app search
+					const res = await fetch(url, {
 						headers: {
 							Authorization: `Bearer ${pdToken}`,
-							"x-pd-environment": this.env.PIPEDREAM_ENV,
 						},
 					});
 					if (!res.ok)
 						throw new Error(`Pipedream apps search error ${res.status}`);
 					const body = (await res.json()) as { data?: PdAppInfo[] };
-					const allApps = body.data || [];
+					let allApps = body.data || [];
 
+					// Apply additional client-side filters for parameters not supported by API
 					let filteredApps = allApps;
-
-					// Apply filters based on provided parameters
-					if (query) {
-						const queryLower = query.toLowerCase();
-						filteredApps = filteredApps.filter(
-							(app) =>
-								app.name?.toLowerCase().includes(queryLower) ||
-								app.name_slug?.toLowerCase().includes(queryLower) ||
-								app.description?.toLowerCase().includes(queryLower) ||
-								app.connect?.allowed_domains?.some((domain) =>
-									domain.toLowerCase().includes(queryLower),
-								),
-						);
-					}
-
 					if (name) {
 						const nameLower = name.toLowerCase();
 						filteredApps = filteredApps.filter((app) =>
