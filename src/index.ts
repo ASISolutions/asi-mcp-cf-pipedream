@@ -153,30 +153,33 @@ async function fetchProxyEnabledApps(
 }
 
 // Enhanced search interface for apps
+// Enhanced app search result with display-friendly formatting
 interface AppSearchResult {
-	appSlug: string;
+	name_slug: string;
 	name?: string;
 	description?: string;
 	app_type?: string;
 	categories?: string[];
-	allowedDomains: string[];
-	isDynamic: boolean;
-	connect?: {
-		proxy_enabled?: boolean;
-		base_proxy_target_url?: string;
-	};
+	connect_enabled: boolean;
+	allowed_domains: string[];
+	base_url?: string;
+	is_dynamic: boolean;
 }
 
 let IN_MEMORY_APPS_SEARCH: { expiresAt: number; data: AppSearchResult[] } | undefined;
 
-async function searchApps(
+/**
+ * Enhanced search function with caching and comprehensive filtering
+ */
+async function searchAppsWithCache(
 	env: Env,
 	pdToken: string,
 	query?: string,
+	limit = 20,
 ): Promise<AppSearchResult[]> {
 	// In-memory cache (best-effort; may be evicted across cold starts)
 	const now = Date.now();
-	let allApps: AppSearchResult[];
+	let allApps: AppSearchResult[] | undefined;
 	
 	if (IN_MEMORY_APPS_SEARCH && IN_MEMORY_APPS_SEARCH.expiresAt > now) {
 		allApps = IN_MEMORY_APPS_SEARCH.data;
@@ -197,79 +200,99 @@ async function searchApps(
 			}
 		} catch {}
 
-		if (!allApps!) {
-			// Fetch from Pipedream REST API
-			const res = await fetch("https://api.pipedream.com/v1/apps", {
-				headers: {
-					Authorization: `Bearer ${pdToken}`,
-					"x-pd-environment": env.PIPEDREAM_ENV,
-				},
-			});
-			if (!res.ok) throw new Error(`Pipedream apps list error ${res.status}`);
-			const body = (await res.json()) as { data?: PdAppInfo[] };
-			const apps = (body.data || []).filter((a) => a.connect?.proxy_enabled);
-
-			allApps = apps.map((a) => {
-				const allowed = (a.connect?.allowed_domains || []).map((d) =>
-					d.toLowerCase(),
-				);
-				const baseUrl = a.connect?.base_proxy_target_url || "";
-				const isDynamic = /\{\{[^}]+\}\}/.test(baseUrl);
-				// For static apps, if no allowed_domains are present, infer host from base URL
-				if (!isDynamic && allowed.length === 0) {
-					try {
-						const u = new URL(baseUrl);
-						if (u.hostname) allowed.push(u.hostname.toLowerCase());
-					} catch {}
-				}
-				return {
-					appSlug: a.name_slug,
-					name: a.name,
-					description: a.description,
-					app_type: a.app_type,
-					categories: a.categories,
-					allowedDomains: allowed,
-					isDynamic,
-					connect: a.connect,
-				};
-			});
-
-			const expiresAt = now + 15 * 60 * 1000; // 15 minutes
-			IN_MEMORY_APPS_SEARCH = { expiresAt, data: allApps };
+		if (!allApps) {
+			// Fetch from Pipedream REST API with error handling
 			try {
-				await env.USER_LINKS.put(
-					kvKey,
-					JSON.stringify({ expiresAt, data: allApps }),
-					{ expirationTtl: 30 * 60 },
-				);
-			} catch {}
+				const res = await fetch("https://api.pipedream.com/v1/apps", {
+					headers: {
+						Authorization: `Bearer ${pdToken}`,
+						"x-pd-environment": env.PIPEDREAM_ENV,
+					},
+				});
+				if (!res.ok) throw new Error(`Pipedream apps API error ${res.status}`);
+				const body = (await res.json()) as { data?: PdAppInfo[] };
+				const apps = body.data || [];
+
+				// Transform to search-friendly format
+				allApps = apps.map((a) => {
+					const allowed = (a.connect?.allowed_domains || []).map((d) =>
+						d.toLowerCase(),
+					);
+					const baseUrl = a.connect?.base_proxy_target_url || "";
+					const isDynamic = /\{\{[^}]+\}\}/.test(baseUrl);
+					// For static apps, if no allowed_domains are present, infer host from base URL
+					if (!isDynamic && allowed.length === 0 && baseUrl) {
+						try {
+							const u = new URL(baseUrl);
+							if (u.hostname) allowed.push(u.hostname.toLowerCase());
+						} catch {}
+					}
+					return {
+						name_slug: a.name_slug,
+						name: a.name,
+						description: a.description,
+						app_type: a.app_type,
+						categories: a.categories,
+						connect_enabled: !!a.connect?.proxy_enabled,
+						allowed_domains: allowed,
+						base_url: baseUrl,
+						is_dynamic: isDynamic,
+					};
+				});
+
+				const expiresAt = now + 15 * 60 * 1000; // 15 minutes
+				IN_MEMORY_APPS_SEARCH = { expiresAt, data: allApps };
+				try {
+					await env.USER_LINKS.put(
+						kvKey,
+						JSON.stringify({ expiresAt, data: allApps }),
+						{ expirationTtl: 30 * 60 },
+					);
+				} catch {}
+			} catch (error) {
+				throw new Error(`Failed to fetch apps: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			}
 		}
 	}
 
 	// Filter apps by search query if provided
-	if (!query || query.trim() === "") {
-		return allApps;
+	let filteredApps = allApps;
+	if (query && query.trim() !== "") {
+		const searchTerm = query.toLowerCase().trim();
+		filteredApps = allApps.filter(app => {
+			// Search in app slug
+			if (app.name_slug.toLowerCase().includes(searchTerm)) return true;
+			
+			// Search in display name
+			if (app.name && app.name.toLowerCase().includes(searchTerm)) return true;
+			
+			// Search in description
+			if (app.description && app.description.toLowerCase().includes(searchTerm)) return true;
+			
+			// Search in categories
+			if (app.categories && app.categories.some(cat => cat.toLowerCase().includes(searchTerm))) return true;
+			
+			// Search in allowed domains (for user convenience)
+			if (app.allowed_domains.some(domain => domain.includes(searchTerm))) return true;
+			
+			return false;
+		});
 	}
 
-	const searchTerm = query.toLowerCase().trim();
-	return allApps.filter(app => {
-		// Search in app slug
-		if (app.appSlug.toLowerCase().includes(searchTerm)) return true;
-		
-		// Search in display name
-		if (app.name && app.name.toLowerCase().includes(searchTerm)) return true;
-		
-		// Search in description
-		if (app.description && app.description.toLowerCase().includes(searchTerm)) return true;
-		
-		// Search in categories
-		if (app.categories && app.categories.some(cat => cat.toLowerCase().includes(searchTerm))) return true;
-		
-		// Search in allowed domains (for user convenience)
-		if (app.allowedDomains.some(domain => domain.includes(searchTerm))) return true;
-		
-		return false;
-	});
+	// Sort by relevance (exact matches first, then alphabetical)
+	if (query) {
+		filteredApps.sort((a, b) => {
+			const queryLower = query.toLowerCase();
+			const aExact = a.name_slug.toLowerCase() === queryLower;
+			const bExact = b.name_slug.toLowerCase() === queryLower;
+			if (aExact && !bExact) return -1;
+			if (!aExact && bExact) return 1;
+			return (a.name || a.name_slug).localeCompare(b.name || b.name_slug);
+		});
+	}
+
+	// Apply limit
+	return filteredApps.slice(0, limit);
 }
 
 function resolveAppFromFullUrl(
@@ -1479,7 +1502,7 @@ ${connectedApps.length > 0
 
 					// Process headers for Pipedream Connect proxy
 					// Pipedream Connect proxy only forwards headers with x-pd-proxy- prefix
-					let processedHeaders: Record<string, string> | undefined = undefined;
+					let processedHeaders: Record<string, string> | undefined ;
 					if (headers) {
 						processedHeaders = {};
 						for (const [key, value] of Object.entries(headers)) {

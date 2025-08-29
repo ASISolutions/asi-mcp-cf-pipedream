@@ -9,7 +9,9 @@
 		"enabled": true
 	},
 	"files": {
-		"includes": ["!worker-configuration.d.ts", "src/**/*"]
+		"includes": ["!worker-configuration.d.ts", "src/**/*"],
+		"ignoreUnknown": true,
+		"maxSize": 5242880
 	},
 	"formatter": {
 		"enabled": true,
