@@ -57,7 +57,7 @@ jobs:
         with:
           script: |
             const prNumber = context.issue.number;
-            const previewUrl = `https://asi-mcp-pr-${prNumber}.asi-solutions.workers.dev`;
+            const previewUrl = `https://asi-mcp-pr-${prNumber}.asi-cloud.workers.dev`;
             
             const comment = `## 🚀 Preview Deployment Ready!
             
