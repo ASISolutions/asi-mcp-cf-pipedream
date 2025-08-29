@@ -1,5 +1,5 @@
 // src/github-sop-search.ts
-import { parse as yamlParse } from 'yaml';
+import { parse as yamlParse } from "yaml";
 
 // ---- Types ----
 export interface SOPSearchResult {
@@ -16,21 +16,24 @@ export interface SOPMetadata {
 	type?: string;
 	search_terms?: string[];
 	description?: string;
-	systems?: Record<string, {
-		operations?: string[];
-		required?: boolean;
-		pipedream_app?: string;
-		display_name?: string;
-		api_version?: string;
-		base_url?: string;
-		auth?: {
-			type: string;
-			scopes?: string[];
-			environment?: string;
-		};
-		defaults?: Record<string, string>;
-		[key: string]: any;
-	}>;
+	systems?: Record<
+		string,
+		{
+			operations?: string[];
+			required?: boolean;
+			pipedream_app?: string;
+			display_name?: string;
+			api_version?: string;
+			base_url?: string;
+			auth?: {
+				type: string;
+				scopes?: string[];
+				environment?: string;
+			};
+			defaults?: Record<string, string>;
+			[key: string]: any;
+		}
+	>;
 	estimated_time?: string;
 	requires_approval?: boolean;
 	compliance?: string[];
@@ -43,7 +46,14 @@ export interface SOPMetadata {
 }
 
 export interface SearchOptions {
-	searchType?: 'process' | 'quick' | 'system' | 'sales' | 'finance' | 'operations' | 'support';
+	searchType?:
+		| "process"
+		| "quick"
+		| "system"
+		| "sales"
+		| "finance"
+		| "operations"
+		| "support";
 	system?: string;
 	limit?: number;
 	includeContent?: boolean;
@@ -75,7 +85,12 @@ export class SOPSearchService {
 	private branch: string;
 	private githubToken: string;
 
-	constructor(githubToken: string, owner = 'ASISolutions', repo = 'docs', branch = 'main') {
+	constructor(
+		githubToken: string,
+		owner = "ASISolutions",
+		repo = "docs",
+		branch = "main",
+	) {
 		this.githubToken = githubToken;
 		this.owner = owner;
 		this.repo = repo;
@@ -85,7 +100,10 @@ export class SOPSearchService {
 	/**
 	 * Main search method - interprets user intent and searches appropriately
 	 */
-	async search(userQuery: string, options: SearchOptions = {}): Promise<SOPSearchResult[]> {
+	async search(
+		userQuery: string,
+		options: SearchOptions = {},
+	): Promise<SOPSearchResult[]> {
 		// Check for direct process code
 		const processCode = this.extractProcessCode(userQuery);
 		if (processCode) {
@@ -95,43 +113,57 @@ export class SOPSearchService {
 
 		// Build and execute search
 		const searchQuery = this.buildSearchQuery(userQuery, options);
-		
+
 		try {
 			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&sort=indexed&per_page=${options.limit || 5}`;
 			console.log(`GitHub search URL: ${searchUrl}`);
 			console.log(`GitHub search query: ${searchQuery}`);
-			
+
 			const response = await fetch(searchUrl, {
 				headers: {
-					'Authorization': `Bearer ${this.githubToken}`,
-					'Accept': 'application/vnd.github+json',
-					'X-GitHub-Api-Version': '2022-11-28',
-					'User-Agent': 'asi-mcp-worker/1.0'
-				}
+					Authorization: `Bearer ${this.githubToken}`,
+					Accept: "application/vnd.github+json",
+					"X-GitHub-Api-Version": "2022-11-28",
+					"User-Agent": "asi-mcp-worker/1.0",
+				},
 			});
 
 			if (!response.ok) {
 				const errorText = await response.text();
-				console.error(`GitHub search failed: ${response.status} - ${errorText}`);
-				throw new Error(`GitHub search failed: ${response.status} - ${errorText}`);
+				console.error(
+					`GitHub search failed: ${response.status} - ${errorText}`,
+				);
+				throw new Error(
+					`GitHub search failed: ${response.status} - ${errorText}`,
+				);
 			}
 
-			const data = await response.json() as { items: Array<{ path: string }>, total_count: number };
-			console.log(`GitHub search returned ${data.total_count} total results, ${data.items.length} items`);
-			
+			const data = (await response.json()) as {
+				items: Array<{ path: string }>;
+				total_count: number;
+			};
+			console.log(
+				`GitHub search returned ${data.total_count} total results, ${data.items.length} items`,
+			);
+
 			// Fetch full content for each result
 			const results = await Promise.allSettled(
-				data.items.map(item => this.fetchDocument(item.path, options.includeContent))
+				data.items.map((item) =>
+					this.fetchDocument(item.path, options.includeContent),
+				),
 			);
 
 			return results
-				.filter((result): result is PromiseFulfilledResult<SOPSearchResult> => 
-					result.status === 'fulfilled' && result.value !== null
+				.filter(
+					(result): result is PromiseFulfilledResult<SOPSearchResult> =>
+						result.status === "fulfilled" && result.value !== null,
 				)
-				.map(result => result.value);
+				.map((result) => result.value);
 		} catch (error) {
-			console.error('GitHub search error:', error);
-			throw new Error(`Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			console.error("GitHub search error:", error);
+			throw new Error(
+				`Search failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
 		}
 	}
 
@@ -144,15 +176,15 @@ export class SOPSearchService {
 		// Add path filters based on search type
 		if (options.searchType) {
 			const pathMap: Record<string, string> = {
-				'process': 'path:processes',
-				'quick': 'path:quick-actions',
-				'system': 'path:apps',
-				'sales': 'path:processes/sales',
-				'finance': 'path:processes/finance',
-				'operations': 'path:processes/operations',
-				'support': 'path:processes/support'
+				process: "path:processes",
+				quick: "path:quick-actions",
+				system: "path:apps",
+				sales: "path:processes/sales",
+				finance: "path:processes/finance",
+				operations: "path:processes/operations",
+				support: "path:processes/support",
 			};
-			
+
 			if (pathMap[options.searchType]) {
 				query += `${pathMap[options.searchType]} `;
 			}
@@ -174,7 +206,7 @@ export class SOPSearchService {
 		}
 
 		// Always filter to markdown files
-		query += 'extension:md';
+		query += "extension:md";
 
 		return query.trim();
 	}
@@ -193,34 +225,39 @@ export class SOPSearchService {
 	async getByProcessCode(processCode: string): Promise<SOPSearchResult | null> {
 		const searchQuery = `repo:${this.owner}/${this.repo} process_code:${processCode} extension:md`;
 		console.log(`Process code search query: ${searchQuery}`);
-		
+
 		try {
 			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&per_page=1`;
 			console.log(`Process code search URL: ${searchUrl}`);
-			
+
 			const response = await fetch(searchUrl, {
 				headers: {
-					'Authorization': `Bearer ${this.githubToken}`,
-					'Accept': 'application/vnd.github+json',
-					'X-GitHub-Api-Version': '2022-11-28',
-					'User-Agent': 'asi-mcp-worker/1.0'
-				}
+					Authorization: `Bearer ${this.githubToken}`,
+					Accept: "application/vnd.github+json",
+					"X-GitHub-Api-Version": "2022-11-28",
+					"User-Agent": "asi-mcp-worker/1.0",
+				},
 			});
 
 			if (!response.ok) {
 				throw new Error(`GitHub search failed: ${response.status}`);
 			}
 
-			const data = await response.json() as { items: Array<{ path: string }>, total_count: number };
-			console.log(`Process code search returned ${data.total_count} total results, ${data.items.length} items`);
-			
+			const data = (await response.json()) as {
+				items: Array<{ path: string }>;
+				total_count: number;
+			};
+			console.log(
+				`Process code search returned ${data.total_count} total results, ${data.items.length} items`,
+			);
+
 			if (data.items.length > 0) {
 				console.log(`Found process code in file: ${data.items[0].path}`);
 				return await this.fetchDocument(data.items[0].path, true);
 			}
 			return null;
 		} catch (error) {
-			console.error('Process code search error:', error);
+			console.error("Process code search error:", error);
 			return null;
 		}
 	}
@@ -228,33 +265,44 @@ export class SOPSearchService {
 	/**
 	 * Fetch full document content with metadata
 	 */
-	async fetchDocument(path: string, includeContent = true): Promise<SOPSearchResult | null> {
+	async fetchDocument(
+		path: string,
+		includeContent = true,
+	): Promise<SOPSearchResult | null> {
 		try {
-			const response = await fetch(`https://api.github.com/repos/${this.owner}/${this.repo}/contents/${path}`, {
-				headers: {
-					'Authorization': `Bearer ${this.githubToken}`,
-					'Accept': 'application/vnd.github+json',
-					'X-GitHub-Api-Version': '2022-11-28',
-					'User-Agent': 'asi-mcp-worker/1.0'
-				}
-			});
+			const response = await fetch(
+				`https://api.github.com/repos/${this.owner}/${this.repo}/contents/${path}`,
+				{
+					headers: {
+						Authorization: `Bearer ${this.githubToken}`,
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": "asi-mcp-worker/1.0",
+					},
+				},
+			);
 
 			if (!response.ok) {
 				throw new Error(`Failed to fetch document: ${response.status}`);
 			}
 
-			const data = await response.json() as { content: string; encoding: string };
-			const content = Buffer.from(data.content, 'base64').toString('utf-8');
+			const data = (await response.json()) as {
+				content: string;
+				encoding: string;
+			};
+			const content = Buffer.from(data.content, "base64").toString("utf-8");
 			const { metadata, body } = this.parseDocument(content);
 
 			// Enrich systems data with configuration
 			if (metadata.systems) {
 				const enrichedSystems: typeof metadata.systems = {};
-				for (const [systemSlug, systemData] of Object.entries(metadata.systems)) {
+				for (const [systemSlug, systemData] of Object.entries(
+					metadata.systems,
+				)) {
 					const config = await this.getSystemConfig(systemSlug);
 					enrichedSystems[systemSlug] = {
 						...config,
-						...systemData
+						...systemData,
 					};
 				}
 				metadata.systems = enrichedSystems;
@@ -263,8 +311,8 @@ export class SOPSearchService {
 			return {
 				path,
 				metadata,
-				content: includeContent ? body : '',
-				raw: content
+				content: includeContent ? body : "",
+				raw: content,
 			};
 		} catch (error) {
 			console.error(`Error fetching document ${path}:`, error);
@@ -285,7 +333,7 @@ export class SOPSearchService {
 				const body = match[2];
 				return { metadata, body };
 			} catch (error) {
-				console.warn('Failed to parse YAML frontmatter:', error);
+				console.warn("Failed to parse YAML frontmatter:", error);
 				return { metadata: {}, body: content };
 			}
 		}
@@ -299,9 +347,11 @@ export class SOPSearchService {
 	async getSystemConfig(systemSlug: string): Promise<SystemConfig> {
 		// Since the current repo doesn't have _config.yml files, return minimal config
 		// This can be enhanced later if config files are added
-		return { 
+		return {
 			pipedream_app: systemSlug,
-			display_name: systemSlug.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+			display_name: systemSlug
+				.replace(/_/g, " ")
+				.replace(/\b\w/g, (l) => l.toUpperCase()),
 		};
 	}
 
@@ -317,11 +367,11 @@ export class SOPSearchService {
 	}
 
 	async searchBySystem(pipedreamSlug: string): Promise<SOPSearchResult[]> {
-		return this.search('', { system: pipedreamSlug, limit: 10 });
+		return this.search("", { system: pipedreamSlug, limit: 10 });
 	}
 
 	async searchRequiringApproval(): Promise<SOPSearchResult[]> {
-		return this.search('requires_approval:true', { limit: 10 });
+		return this.search("requires_approval:true", { limit: 10 });
 	}
 
 	/**
@@ -329,34 +379,40 @@ export class SOPSearchService {
 	 */
 	async getRecentlyModified(limit = 5): Promise<SOPSearchResult[]> {
 		const query = `repo:${this.owner}/${this.repo} path:processes extension:md`;
-		
+
 		try {
-			const response = await fetch(`https://api.github.com/search/code?q=${encodeURIComponent(query)}&sort=indexed&per_page=${limit}`, {
-				headers: {
-					'Authorization': `Bearer ${this.githubToken}`,
-					'Accept': 'application/vnd.github+json',
-					'X-GitHub-Api-Version': '2022-11-28',
-					'User-Agent': 'asi-mcp-worker/1.0'
-				}
-			});
+			const response = await fetch(
+				`https://api.github.com/search/code?q=${encodeURIComponent(query)}&sort=indexed&per_page=${limit}`,
+				{
+					headers: {
+						Authorization: `Bearer ${this.githubToken}`,
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": "asi-mcp-worker/1.0",
+					},
+				},
+			);
 
 			if (!response.ok) {
 				throw new Error(`GitHub search failed: ${response.status}`);
 			}
 
-			const data = await response.json() as { items: Array<{ path: string }> };
-			
+			const data = (await response.json()) as {
+				items: Array<{ path: string }>;
+			};
+
 			const results = await Promise.allSettled(
-				data.items.map(item => this.fetchDocument(item.path, false))
+				data.items.map((item) => this.fetchDocument(item.path, false)),
 			);
 
 			return results
-				.filter((result): result is PromiseFulfilledResult<SOPSearchResult> => 
-					result.status === 'fulfilled' && result.value !== null
+				.filter(
+					(result): result is PromiseFulfilledResult<SOPSearchResult> =>
+						result.status === "fulfilled" && result.value !== null,
 				)
-				.map(result => result.value);
+				.map((result) => result.value);
 		} catch (error) {
-			console.error('Recent search error:', error);
+			console.error("Recent search error:", error);
 			return [];
 		}
 	}
