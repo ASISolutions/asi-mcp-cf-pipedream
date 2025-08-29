@@ -57,7 +57,7 @@ export interface Env {
 
 // (removed) static host-to-app utility in favor of Pipedream apps index
 
-// (removed) http_request tool and feature flag; rely on proxy_request universally
+// (removed) http_request tool and feature flag; rely on asi_magic_tool universally
 
 // ---- Dynamic Pipedream Apps cache (for host->app detection) ----
 interface PdAppInfo {
@@ -153,30 +153,33 @@ async function fetchProxyEnabledApps(
 }
 
 // Enhanced search interface for apps
+// Enhanced app search result with display-friendly formatting
 interface AppSearchResult {
-	appSlug: string;
+	name_slug: string;
 	name?: string;
 	description?: string;
 	app_type?: string;
 	categories?: string[];
-	allowedDomains: string[];
-	isDynamic: boolean;
-	connect?: {
-		proxy_enabled?: boolean;
-		base_proxy_target_url?: string;
-	};
+	connect_enabled: boolean;
+	allowed_domains: string[];
+	base_url?: string;
+	is_dynamic: boolean;
 }
 
 let IN_MEMORY_APPS_SEARCH: { expiresAt: number; data: AppSearchResult[] } | undefined;
 
-async function searchApps(
+/**
+ * Enhanced search function with caching and comprehensive filtering
+ */
+async function searchAppsWithCache(
 	env: Env,
 	pdToken: string,
 	query?: string,
+	limit = 20,
 ): Promise<AppSearchResult[]> {
 	// In-memory cache (best-effort; may be evicted across cold starts)
 	const now = Date.now();
-	let allApps: AppSearchResult[];
+	let allApps: AppSearchResult[] | undefined;
 	
 	if (IN_MEMORY_APPS_SEARCH && IN_MEMORY_APPS_SEARCH.expiresAt > now) {
 		allApps = IN_MEMORY_APPS_SEARCH.data;
@@ -197,79 +200,99 @@ async function searchApps(
 			}
 		} catch {}
 
-		if (!allApps!) {
-			// Fetch from Pipedream REST API
-			const res = await fetch("https://api.pipedream.com/v1/apps", {
-				headers: {
-					Authorization: `Bearer ${pdToken}`,
-					"x-pd-environment": env.PIPEDREAM_ENV,
-				},
-			});
-			if (!res.ok) throw new Error(`Pipedream apps list error ${res.status}`);
-			const body = (await res.json()) as { data?: PdAppInfo[] };
-			const apps = (body.data || []).filter((a) => a.connect?.proxy_enabled);
-
-			allApps = apps.map((a) => {
-				const allowed = (a.connect?.allowed_domains || []).map((d) =>
-					d.toLowerCase(),
-				);
-				const baseUrl = a.connect?.base_proxy_target_url || "";
-				const isDynamic = /\{\{[^}]+\}\}/.test(baseUrl);
-				// For static apps, if no allowed_domains are present, infer host from base URL
-				if (!isDynamic && allowed.length === 0) {
-					try {
-						const u = new URL(baseUrl);
-						if (u.hostname) allowed.push(u.hostname.toLowerCase());
-					} catch {}
-				}
-				return {
-					appSlug: a.name_slug,
-					name: a.name,
-					description: a.description,
-					app_type: a.app_type,
-					categories: a.categories,
-					allowedDomains: allowed,
-					isDynamic,
-					connect: a.connect,
-				};
-			});
-
-			const expiresAt = now + 15 * 60 * 1000; // 15 minutes
-			IN_MEMORY_APPS_SEARCH = { expiresAt, data: allApps };
+		if (!allApps) {
+			// Fetch from Pipedream REST API with error handling
 			try {
-				await env.USER_LINKS.put(
-					kvKey,
-					JSON.stringify({ expiresAt, data: allApps }),
-					{ expirationTtl: 30 * 60 },
-				);
-			} catch {}
+				const res = await fetch("https://api.pipedream.com/v1/apps", {
+					headers: {
+						Authorization: `Bearer ${pdToken}`,
+						"x-pd-environment": env.PIPEDREAM_ENV,
+					},
+				});
+				if (!res.ok) throw new Error(`Pipedream apps API error ${res.status}`);
+				const body = (await res.json()) as { data?: PdAppInfo[] };
+				const apps = body.data || [];
+
+				// Transform to search-friendly format
+				allApps = apps.map((a) => {
+					const allowed = (a.connect?.allowed_domains || []).map((d) =>
+						d.toLowerCase(),
+					);
+					const baseUrl = a.connect?.base_proxy_target_url || "";
+					const isDynamic = /\{\{[^}]+\}\}/.test(baseUrl);
+					// For static apps, if no allowed_domains are present, infer host from base URL
+					if (!isDynamic && allowed.length === 0 && baseUrl) {
+						try {
+							const u = new URL(baseUrl);
+							if (u.hostname) allowed.push(u.hostname.toLowerCase());
+						} catch {}
+					}
+					return {
+						name_slug: a.name_slug,
+						name: a.name,
+						description: a.description,
+						app_type: a.app_type,
+						categories: a.categories,
+						connect_enabled: !!a.connect?.proxy_enabled,
+						allowed_domains: allowed,
+						base_url: baseUrl,
+						is_dynamic: isDynamic,
+					};
+				});
+
+				const expiresAt = now + 15 * 60 * 1000; // 15 minutes
+				IN_MEMORY_APPS_SEARCH = { expiresAt, data: allApps };
+				try {
+					await env.USER_LINKS.put(
+						kvKey,
+						JSON.stringify({ expiresAt, data: allApps }),
+						{ expirationTtl: 30 * 60 },
+					);
+				} catch {}
+			} catch (error) {
+				throw new Error(`Failed to fetch apps: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			}
 		}
 	}
 
 	// Filter apps by search query if provided
-	if (!query || query.trim() === "") {
-		return allApps;
+	let filteredApps = allApps;
+	if (query && query.trim() !== "") {
+		const searchTerm = query.toLowerCase().trim();
+		filteredApps = allApps.filter(app => {
+			// Search in app slug
+			if (app.name_slug.toLowerCase().includes(searchTerm)) return true;
+			
+			// Search in display name
+			if (app.name && app.name.toLowerCase().includes(searchTerm)) return true;
+			
+			// Search in description
+			if (app.description && app.description.toLowerCase().includes(searchTerm)) return true;
+			
+			// Search in categories
+			if (app.categories && app.categories.some(cat => cat.toLowerCase().includes(searchTerm))) return true;
+			
+			// Search in allowed domains (for user convenience)
+			if (app.allowed_domains.some(domain => domain.includes(searchTerm))) return true;
+			
+			return false;
+		});
 	}
 
-	const searchTerm = query.toLowerCase().trim();
-	return allApps.filter(app => {
-		// Search in app slug
-		if (app.appSlug.toLowerCase().includes(searchTerm)) return true;
-		
-		// Search in display name
-		if (app.name && app.name.toLowerCase().includes(searchTerm)) return true;
-		
-		// Search in description
-		if (app.description && app.description.toLowerCase().includes(searchTerm)) return true;
-		
-		// Search in categories
-		if (app.categories && app.categories.some(cat => cat.toLowerCase().includes(searchTerm))) return true;
-		
-		// Search in allowed domains (for user convenience)
-		if (app.allowedDomains.some(domain => domain.includes(searchTerm))) return true;
-		
-		return false;
-	});
+	// Sort by relevance (exact matches first, then alphabetical)
+	if (query) {
+		filteredApps.sort((a, b) => {
+			const queryLower = query.toLowerCase();
+			const aExact = a.name_slug.toLowerCase() === queryLower;
+			const bExact = b.name_slug.toLowerCase() === queryLower;
+			if (aExact && !bExact) return -1;
+			if (!aExact && bExact) return 1;
+			return (a.name || a.name_slug).localeCompare(b.name || b.name_slug);
+		});
+	}
+
+	// Apply limit
+	return filteredApps.slice(0, limit);
 }
 
 function resolveAppFromFullUrl(
@@ -684,7 +707,7 @@ async function proxyRequest(
 	return { status: resp.status, data };
 }
 
-// (removed) Xero tenant helper; proxy_request path is now canonical
+// (removed) Xero tenant helper; asi_magic_tool path is now canonical
 
 // ---- MCP Server class ----
 export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
@@ -852,7 +875,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 				const instructions = `
 ## Assistant Instructions
 
-If the user asks you to perform a task, search for the relevant SOP and follow it. The SOP will contain the required apps and HTTP requests to make with the proxy_request tool.
+If the user asks you to perform a task, search for the relevant SOP and follow it. The SOP will contain the required apps and HTTP requests to make with the asi_magic_tool.
 
 If the user needs to connect to an app, use the app slug from the SOP. If it's not in the SOP, you can search for the app with the search_apps tool.
 
@@ -868,7 +891,7 @@ ${connectedApps.length > 0
 1. **Search for relevant SOPs** using the \`search_sop_docs\` tool
 2. **Follow the SOP process** - it contains the required apps and API calls
 3. **Connect to required apps** if not already connected using \`auth_connect\` with the app slug from the SOP
-4. **Make API requests** using the \`proxy_request\` tool as specified in the SOP
+4. **Make API requests** using the \`asi_magic_tool\` as specified in the SOP
 5. **Handle any authentication** - if a request fails with auth required, use the connect URL provided
 
 ## Available Tools
@@ -877,7 +900,7 @@ ${connectedApps.length > 0
 - \`search_apps\` - Find available apps to connect to
 - \`auth_connect\` - Generate connection links for apps
 - \`auth_status\` - Check current connection status
-- \`proxy_request\` - Make authenticated API requests
+- \`asi_magic_tool\` - Make authenticated API requests
 - \`send_feedback\` - Report issues or request new features
 `;
 
@@ -1092,30 +1115,125 @@ ${connectedApps.length > 0
 		this.server.tool(
 			"search_apps",
 			{
-				query: z.string().optional().describe("Search term to filter apps by name, slug, description, or domain. Leave empty to list all apps."),
-				limit: z.number().min(1).max(50).optional().describe("Maximum number of results to return (default: 20)"),
+				query: z.string().min(1).max(200).optional(),
+				name: z.string().min(1).max(100).optional(),
+				slug: z.string().min(1).max(100).optional(),
+				description: z.string().min(1).max(200).optional(),
+				domain: z.string().min(1).max(100).optional(),
+				limit: z.number().min(1).max(50).optional(),
 			},
 			this.withSentryInstrumentation(
 				"search_apps",
 				() => undefined, // no single app
-				async ({ query, limit }: { query?: string; limit?: number }) => {
+				async ({
+					query,
+					name,
+					slug,
+					description,
+					domain,
+					limit = 10,
+				}: {
+					query?: string;
+					name?: string;
+					slug?: string;
+					description?: string;
+					domain?: string;
+					limit?: number;
+				}) => {
 					const pdToken = await getPdAccessToken(this.env);
-					const allResults = await searchApps(this.env, pdToken, query);
 					
+					// Fetch all available apps from Pipedream
+					const res = await fetch("https://api.pipedream.com/v1/apps", {
+						headers: {
+							Authorization: `Bearer ${pdToken}`,
+							"x-pd-environment": this.env.PIPEDREAM_ENV,
+						},
+					});
+					if (!res.ok) throw new Error(`Pipedream apps search error ${res.status}`);
+					const body = (await res.json()) as { data?: PdAppInfo[] };
+					const allApps = body.data || [];
+
+					let filteredApps = allApps;
+
+					// Apply filters based on provided parameters
+					if (query) {
+						const queryLower = query.toLowerCase();
+						filteredApps = filteredApps.filter(app => 
+							app.name?.toLowerCase().includes(queryLower) ||
+							app.name_slug?.toLowerCase().includes(queryLower) ||
+							app.description?.toLowerCase().includes(queryLower) ||
+							app.connect?.allowed_domains?.some(domain => 
+								domain.toLowerCase().includes(queryLower)
+							)
+						);
+					}
+
+					if (name) {
+						const nameLower = name.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.name?.toLowerCase().includes(nameLower)
+						);
+					}
+
+					if (slug) {
+						const slugLower = slug.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.name_slug?.toLowerCase().includes(slugLower)
+						);
+					}
+
+					if (description) {
+						const descLower = description.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.description?.toLowerCase().includes(descLower)
+						);
+					}
+
+					if (domain) {
+						const domainLower = domain.toLowerCase();
+						filteredApps = filteredApps.filter(app =>
+							app.connect?.allowed_domains?.some(d => 
+								d.toLowerCase().includes(domainLower)
+							)
+						);
+					}
+
+					// Sort by relevance (exact matches first, then alphabetical)
+					filteredApps.sort((a, b) => {
+						if (query) {
+							const aExact = a.name_slug.toLowerCase() === query.toLowerCase();
+							const bExact = b.name_slug.toLowerCase() === query.toLowerCase();
+							if (aExact && !bExact) return -1;
+							if (!aExact && bExact) return 1;
+						}
+						return (a.name || a.name_slug).localeCompare(b.name || b.name_slug);
+					});
+
 					// Apply limit
-					const maxResults = limit || 20;
-					const results = allResults.slice(0, maxResults);
-					
+					const results = filteredApps.slice(0, limit);
+
+					// Format results for response
+					const formattedResults = results.map(app => ({
+						name_slug: app.name_slug,
+						name: app.name,
+						description: app.description,
+						connect_enabled: !!app.connect?.proxy_enabled,
+						allowed_domains: app.connect?.allowed_domains || [],
+						base_url: app.connect?.base_proxy_target_url,
+						is_dynamic: /\{\{[^}]+\}\}/.test(app.connect?.base_proxy_target_url || ""),
+					}));
+
 					return {
 						content: [
 							{
 								type: "text",
 								text: JSON.stringify({
-									query: query || null,
-									total_found: allResults.length,
-									returned: results.length,
-									apps: results,
-									usage_note: "Use the appSlug field with auth_connect to connect to an app"
+									query,
+									filters: { name, slug, description, domain },
+									results: formattedResults,
+									total_results: formattedResults.length,
+									total_available: allApps.length,
+									environment: this.env.PIPEDREAM_ENV,
 								}),
 							},
 						],
@@ -1126,20 +1244,20 @@ ${connectedApps.length > 0
 
 		// (removed) http_request tool
 
-		// -------- proxy_request --------
+		// -------- ASI Magic Tool (formerly proxy_request) --------
 		this.server.tool(
-			"proxy_request",
+			"asi_magic_tool",
 			{
-				method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
-				url: z.string(),
-				headers: z.record(z.string()).optional(),
-				body: z.union([z.string(), z.record(z.any())]).optional(),
-				account_id: z.string().optional(),
-				app: z.string().optional(),
-				provider: z.enum(["system", "pipedream"]).optional(),
+				method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).describe("HTTP method for the API request"),
+				url: z.string().describe("API endpoint URL. CRITICAL: Before using this tool, ALWAYS search for and review relevant SOPs using search_sop_docs to ensure you follow proper procedures and understand the correct API usage patterns."),
+				headers: z.record(z.string()).optional().describe("Custom HTTP headers for the request"),
+				body: z.union([z.string(), z.record(z.any())]).optional().describe("Request body data (JSON object or string)"),
+				account_id: z.string().optional().describe("Specific account ID to use for authentication"),
+				app: z.string().optional().describe("App slug to use (e.g., 'xero_accounting_api', 'hubspot')"),
+				provider: z.enum(["system", "pipedream"]).optional().describe("Force specific provider (system or pipedream)"),
 			},
 			this.withSentryInstrumentation(
-				"proxy_request",
+				"asi_magic_tool",
 				(args) => {
 					// Try to derive app from args.app or detect from URL
 					if (args.app) return args.app;
@@ -1384,7 +1502,7 @@ ${connectedApps.length > 0
 
 					// Process headers for Pipedream Connect proxy
 					// Pipedream Connect proxy only forwards headers with x-pd-proxy- prefix
-					let processedHeaders: Record<string, string> | undefined = undefined;
+					let processedHeaders: Record<string, string> | undefined ;
 					if (headers) {
 						processedHeaders = {};
 						for (const [key, value] of Object.entries(headers)) {
@@ -1593,11 +1711,11 @@ ${connectedApps.length > 0
 		this.server.tool(
 			"search_sop_docs",
 			{
-				query: z.string().min(1).max(200),
-				search_type: z.enum(['process', 'quick', 'system', 'sales', 'finance', 'operations', 'support']).optional(),
-				system: z.string().optional(),
-				limit: z.number().min(1).max(20).optional(),
-				include_content: z.boolean().optional(),
+				query: z.string().min(1).max(200).describe("Search query for SOP documentation. CRITICAL: Always search for and review relevant SOPs before using the ASI Magic Tool (asi_magic_tool) to ensure proper procedures are followed."),
+				search_type: z.enum(['process', 'quick', 'system', 'sales', 'finance', 'operations', 'support']).optional().describe("Type of SOP to search for"),
+				system: z.string().optional().describe("Specific system name to search SOPs for (e.g., 'xero', 'hubspot')"),
+				limit: z.number().min(1).max(20).optional().describe("Maximum number of results to return"),
+				include_content: z.boolean().optional().describe("Whether to include full SOP content in results"),
 			},
 			this.withSentryInstrumentation(
 				"search_sop_docs",
