@@ -8,6 +8,7 @@ This change tests:
 - GitHub Actions workflow triggering
 - Preview deployment creation
 - URL generation and accessibility
+- Workflow event triggering (synchronize event)
 
 ## Features
 
