@@ -521,14 +521,66 @@ async function directSystemRequest(
 	if (params.app.defaultHeaders)
 		Object.assign(headers, params.app.defaultHeaders);
 
+	// Transform body for Dicker Data API compatibility
+	let transformedBody = params.body;
+	if (
+		params.app.appSlug === "dicker_data" &&
+		params.body &&
+		typeof params.body === "object"
+	) {
+		const body = params.body as Record<string, any>;
+
+		// Transform for GetProductSearchResult API
+		if (finalUrl.includes("/api/product/GetProductSearchResult")) {
+			transformedBody = {
+				searchKeyword:
+					body.searchTerm || body.searchKeyword || body.keyword || "",
+				brand: (body.brand || "").toString().toUpperCase(),
+				type: body.type || body.productType || "",
+				category: body.category || "",
+				series: body.series || "",
+				minPrice: body.minPrice ? body.minPrice.toString() : "",
+				maxPrice: body.maxPrice ? body.maxPrice.toString() : "",
+				excludeKits: body.excludeKits || false,
+				minSOH:
+					body.minStock || body.minSOH
+						? (body.minStock || body.minSOH).toString()
+						: "",
+			};
+			console.log(
+				"🔄 Transformed Dicker Data search payload:",
+				JSON.stringify(transformedBody),
+			);
+		}
+		// Transform for GetProductSearch (filters) API
+		else if (finalUrl.includes("/api/product/GetProductSearch")) {
+			// This endpoint uses GET with query parameters, but support POST body transformation too
+			transformedBody = {
+				in_keyword: body.searchTerm || body.searchKeyword || body.keyword || "",
+				in_brands: body.brand || "",
+				in_types: body.type || body.productType || "",
+				in_categories: body.category || "",
+				in_series: body.series || "",
+				out_type: body.outputType || "N",
+				out_category: body.outputCategory || "N",
+				out_series: body.outputSeries || "N",
+				out_brand: body.outputBrand || "Y",
+			};
+			console.log(
+				"🔄 Transformed Dicker Data filter payload:",
+				JSON.stringify(transformedBody),
+			);
+		}
+	}
+
 	// Body handling
 	let bodyToSend: BodyInit | null = null;
-	if (params.body !== undefined) {
-		if (typeof params.body === "string") {
-			bodyToSend = params.body as string;
+	if (transformedBody !== undefined) {
+		if (typeof transformedBody === "string") {
+			bodyToSend = transformedBody as string;
 			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
 		} else {
-			bodyToSend = JSON.stringify(params.body);
+			bodyToSend = JSON.stringify(transformedBody);
 			if (!headers["Content-Type"])
 				headers["Content-Type"] = "application/json";
 		}
