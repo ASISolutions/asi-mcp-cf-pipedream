@@ -109,8 +109,8 @@ async function fetchProxyEnabledApps(
 		}
 	} catch {}
 
-	// Fetch from Pipedream REST API
-	const res = await fetch("https://api.pipedream.com/v1/apps", {
+	// Fetch from Pipedream Connect API to get all available apps
+	const res = await fetch("https://api.pipedream.com/v1/connect/apps", {
 		headers: {
 			Authorization: `Bearer ${pdToken}`,
 			"x-pd-environment": env.PIPEDREAM_ENV,
@@ -201,9 +201,9 @@ async function searchAppsWithCache(
 		} catch {}
 
 		if (!allApps) {
-			// Fetch from Pipedream REST API with error handling
+			// Fetch from Pipedream Connect API to get all available apps (not just project-specific)
 			try {
-				const res = await fetch("https://api.pipedream.com/v1/apps", {
+				const res = await fetch("https://api.pipedream.com/v1/connect/apps", {
 					headers: {
 						Authorization: `Bearer ${pdToken}`,
 						"x-pd-environment": env.PIPEDREAM_ENV,
@@ -1142,8 +1142,8 @@ ${connectedApps.length > 0
 				}) => {
 					const pdToken = await getPdAccessToken(this.env);
 					
-					// Fetch all available apps from Pipedream
-					const res = await fetch("https://api.pipedream.com/v1/apps", {
+					// Fetch all available apps from Pipedream Connect (not just project-specific apps)
+					const res = await fetch("https://api.pipedream.com/v1/connect/apps", {
 						headers: {
 							Authorization: `Bearer ${pdToken}`,
 							"x-pd-environment": this.env.PIPEDREAM_ENV,
