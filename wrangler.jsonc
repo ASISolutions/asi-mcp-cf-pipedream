@@ -1,6 +1,7 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "asi-mcp",
+	"account_id": "f213ac3aa2d97ea8163c120a8f879b0a",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-08-24",
 	"compatibility_flags": ["nodejs_compat", "nodejs_als"],
