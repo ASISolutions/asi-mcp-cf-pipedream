@@ -1382,6 +1382,22 @@ ${connectedApps.length > 0
 
 					pdToken = pdToken || (await getPdAccessToken(this.env));
 
+					// Process headers for Pipedream Connect proxy
+					// Pipedream Connect proxy only forwards headers with x-pd-proxy- prefix
+					let processedHeaders: Record<string, string> | undefined = undefined;
+					if (headers) {
+						processedHeaders = {};
+						for (const [key, value] of Object.entries(headers)) {
+							// Add x-pd-proxy- prefix to all custom headers so they get forwarded
+							if (!key.toLowerCase().startsWith('x-pd-proxy-')) {
+								processedHeaders[`x-pd-proxy-${key}`] = value;
+							} else {
+								// Already has prefix, keep as-is
+								processedHeaders[key] = value;
+							}
+						}
+					}
+
 					// Add nested span for the actual HTTP request (with fallback)
 					let result: any;
 					const executeProxyRequest = async () => {
@@ -1390,7 +1406,7 @@ ${connectedApps.length > 0
 							account_id: acctId,
 							method,
 							url,
-							headers,
+							headers: processedHeaders,
 							body: proxyBody,
 						});
 
