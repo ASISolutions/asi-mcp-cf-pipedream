@@ -1264,7 +1264,7 @@ ${
 					limit?: number;
 				}) => {
 					const pdToken = await getPdAccessToken(this.env);
-					
+
 					// Fetch all available apps from Pipedream Connect (not just project-specific apps)
 					const res = await fetch("https://api.pipedream.com/v1/connect/apps", {
 						headers: {

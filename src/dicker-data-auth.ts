@@ -22,9 +22,9 @@ export class DickerDataAuth {
 	}
 
 	private getCredentials(): DickerDataCredentials {
-		const account = (this.env as any).DICKER_DATA_ACCOUNT as string;
-		const username = (this.env as any).DICKER_DATA_USERNAME as string;
-		const password = (this.env as any).DICKER_DATA_PASSWORD as string;
+		const account = this.env.DICKER_DATA_ACCOUNT;
+		const username = this.env.DICKER_DATA_USERNAME;
+		const password = this.env.DICKER_DATA_PASSWORD;
 
 		if (!account || !username || !password) {
 			throw new Error("Dicker Data credentials not configured");
@@ -108,7 +108,7 @@ export class DickerDataAuth {
 			throw new Error("Could not extract CSRF token from login page");
 		}
 		const csrfToken = tokenMatch[1];
-		console.log(`🔑 Extracted CSRF token: ${csrfToken.substring(0, 50)}...`);
+		console.log("🔑 CSRF token extracted successfully");
 
 		// Extract initial cookies
 		const initialCookies = this.parseCookies(setCookieHeaders || "");
@@ -182,13 +182,28 @@ export class DickerDataAuth {
 	private parseCookies(setCookieHeader: string): string {
 		if (!setCookieHeader) return "";
 
-		const cookies = setCookieHeader
-			.split(/,(?=[^;]*=)/) // Split on commas that are followed by cookie name=value
-			.map((cookie) => cookie.split(";")[0].trim()) // Take only the name=value part
-			.filter((cookie) => cookie.includes("="))
-			.join("; ");
+		// More robust cookie parsing that handles various Set-Cookie formats
+		const cookies: string[] = [];
 
-		return cookies;
+		// Split by comma, but be careful of dates and other comma-containing values
+		const cookieParts = setCookieHeader.split(/,\s*(?=[\w]+=)/);
+
+		for (const part of cookieParts) {
+			const trimmed = part.trim();
+			if (!trimmed) continue;
+
+			// Extract just the name=value portion (before first semicolon)
+			const nameValueMatch = trimmed.match(/^([^=]+=[^;]*)/);
+			if (nameValueMatch) {
+				const nameValue = nameValueMatch[1].trim();
+				// Validate it's a proper cookie format
+				if (nameValue.includes("=") && !nameValue.startsWith("=")) {
+					cookies.push(nameValue);
+				}
+			}
+		}
+
+		return cookies.join("; ");
 	}
 
 	private mergeCookies(existing: string, newSetCookie: string): string {
@@ -247,13 +262,54 @@ export class DickerDataAuth {
 					"User-Agent":
 						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
 				},
+				redirect: "manual", // Handle redirects manually to detect login redirects
 			});
 
-			// If we get redirected to login, session is invalid
-			if (response.status === 302) {
+			// Check for various invalid session indicators
+			if (response.status === 401 || response.status === 403) {
+				console.log("Session validation failed: Unauthorized response");
+				return false;
+			}
+
+			// Handle redirect responses
+			if (response.status >= 300 && response.status < 400) {
 				const location = response.headers.get("location");
-				if (location && location.includes("Login")) {
-					return false;
+				if (location) {
+					const locationLower = location.toLowerCase();
+					// Check for various login/auth redirect patterns
+					if (
+						locationLower.includes("login") ||
+						locationLower.includes("signin") ||
+						locationLower.includes("auth") ||
+						locationLower.includes("account/login")
+					) {
+						console.log(
+							"Session validation failed: Redirected to authentication page",
+						);
+						return false;
+					}
+				}
+			}
+
+			// Check response content for login indicators (as fallback)
+			if (response.ok) {
+				const contentType = response.headers.get("content-type") || "";
+				if (contentType.includes("text/html")) {
+					const text = await response.text();
+					const textLower = text.toLowerCase();
+					// Look for login form indicators in the HTML content
+					if (
+						textLower.includes("<form") &&
+						(textLower.includes('action="login') ||
+							textLower.includes('action="/account/login') ||
+							(textLower.includes('name="password"') &&
+								textLower.includes('name="username"')))
+					) {
+						console.log(
+							"Session validation failed: Login form detected in response",
+						);
+						return false;
+					}
 				}
 			}
 
