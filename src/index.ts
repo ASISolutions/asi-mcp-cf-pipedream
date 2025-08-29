@@ -62,6 +62,10 @@ export interface Env {
 // ---- Dynamic Pipedream Apps cache (for host->app detection) ----
 interface PdAppInfo {
 	name_slug: string;
+	name?: string;
+	description?: string;
+	app_type?: string;
+	categories?: string[];
 	connect?: {
 		proxy_enabled?: boolean;
 		allowed_domains?: string[];
@@ -146,6 +150,126 @@ async function fetchProxyEnabledApps(
 		);
 	} catch {}
 	return index;
+}
+
+// Enhanced search interface for apps
+interface AppSearchResult {
+	appSlug: string;
+	name?: string;
+	description?: string;
+	app_type?: string;
+	categories?: string[];
+	allowedDomains: string[];
+	isDynamic: boolean;
+	connect?: {
+		proxy_enabled?: boolean;
+		base_proxy_target_url?: string;
+	};
+}
+
+let IN_MEMORY_APPS_SEARCH: { expiresAt: number; data: AppSearchResult[] } | undefined;
+
+async function searchApps(
+	env: Env,
+	pdToken: string,
+	query?: string,
+): Promise<AppSearchResult[]> {
+	// In-memory cache (best-effort; may be evicted across cold starts)
+	const now = Date.now();
+	let allApps: AppSearchResult[];
+	
+	if (IN_MEMORY_APPS_SEARCH && IN_MEMORY_APPS_SEARCH.expiresAt > now) {
+		allApps = IN_MEMORY_APPS_SEARCH.data;
+	} else {
+		// KV cache fallback
+		const kvKey = "pd:apps:search";
+		try {
+			const cached = await env.USER_LINKS.get(kvKey);
+			if (cached) {
+				const parsed = JSON.parse(cached) as {
+					expiresAt: number;
+					data: AppSearchResult[];
+				};
+				if (parsed && parsed.expiresAt > now) {
+					IN_MEMORY_APPS_SEARCH = parsed;
+					allApps = parsed.data;
+				}
+			}
+		} catch {}
+
+		if (!allApps!) {
+			// Fetch from Pipedream REST API
+			const res = await fetch("https://api.pipedream.com/v1/apps", {
+				headers: {
+					Authorization: `Bearer ${pdToken}`,
+					"x-pd-environment": env.PIPEDREAM_ENV,
+				},
+			});
+			if (!res.ok) throw new Error(`Pipedream apps list error ${res.status}`);
+			const body = (await res.json()) as { data?: PdAppInfo[] };
+			const apps = (body.data || []).filter((a) => a.connect?.proxy_enabled);
+
+			allApps = apps.map((a) => {
+				const allowed = (a.connect?.allowed_domains || []).map((d) =>
+					d.toLowerCase(),
+				);
+				const baseUrl = a.connect?.base_proxy_target_url || "";
+				const isDynamic = /\{\{[^}]+\}\}/.test(baseUrl);
+				// For static apps, if no allowed_domains are present, infer host from base URL
+				if (!isDynamic && allowed.length === 0) {
+					try {
+						const u = new URL(baseUrl);
+						if (u.hostname) allowed.push(u.hostname.toLowerCase());
+					} catch {}
+				}
+				return {
+					appSlug: a.name_slug,
+					name: a.name,
+					description: a.description,
+					app_type: a.app_type,
+					categories: a.categories,
+					allowedDomains: allowed,
+					isDynamic,
+					connect: a.connect,
+				};
+			});
+
+			const expiresAt = now + 15 * 60 * 1000; // 15 minutes
+			IN_MEMORY_APPS_SEARCH = { expiresAt, data: allApps };
+			try {
+				await env.USER_LINKS.put(
+					kvKey,
+					JSON.stringify({ expiresAt, data: allApps }),
+					{ expirationTtl: 30 * 60 },
+				);
+			} catch {}
+		}
+	}
+
+	// Filter apps by search query if provided
+	if (!query || query.trim() === "") {
+		return allApps;
+	}
+
+	const searchTerm = query.toLowerCase().trim();
+	return allApps.filter(app => {
+		// Search in app slug
+		if (app.appSlug.toLowerCase().includes(searchTerm)) return true;
+		
+		// Search in display name
+		if (app.name && app.name.toLowerCase().includes(searchTerm)) return true;
+		
+		// Search in description
+		if (app.description && app.description.toLowerCase().includes(searchTerm)) return true;
+		
+		// Search in categories
+		if (app.categories && app.categories.some(cat => cat.toLowerCase().includes(searchTerm))) return true;
+		
+		// Search in allowed domains (for user convenience)
+		if (app.allowedDomains.some(domain => domain.includes(searchTerm))) return true;
+		
+		return false;
+	});
 }
 
 function resolveAppFromFullUrl(
@@ -701,6 +825,76 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 	}
 
 	async init() {
+		// -------- assistant_instructions prompt --------
+		this.server.prompt(
+			"assistant_instructions",
+			"Get instructions for the AI assistant on how to help users with their tasks",
+			async () => {
+				const external_user_id = this.getExternalUserId();
+				const pdToken = await getPdAccessToken(this.env);
+				
+				// Get currently connected apps for this user
+				const res = await listAccountsForUser(
+					this.env,
+					pdToken,
+					external_user_id,
+					undefined,
+					false,
+				);
+
+				const connectedApps = (res.data || []).map((a) => ({
+					app: a.app?.name_slug,
+					account_id: a.id,
+					healthy: a.healthy,
+					dead: a.dead,
+				}));
+
+				const instructions = `
+## Assistant Instructions
+
+If the user asks you to perform a task, search for the relevant SOP and follow it. The SOP will contain the required apps and HTTP requests to make with the proxy_request tool.
+
+If the user needs to connect to an app, use the app slug from the SOP. If it's not in the SOP, you can search for the app with the search_apps tool.
+
+## Currently Connected Apps
+
+${connectedApps.length > 0 
+	? connectedApps.map(app => `- **${app.app}** (${app.healthy ? 'healthy' : app.dead ? 'dead' : 'unknown status'}) - Account ID: ${app.account_id}`).join('\n')
+	: '- No apps currently connected'
+}
+
+## Key Steps for Task Execution
+
+1. **Search for relevant SOPs** using the \`search_sop_docs\` tool
+2. **Follow the SOP process** - it contains the required apps and API calls
+3. **Connect to required apps** if not already connected using \`auth_connect\` with the app slug from the SOP
+4. **Make API requests** using the \`proxy_request\` tool as specified in the SOP
+5. **Handle any authentication** - if a request fails with auth required, use the connect URL provided
+
+## Available Tools
+- \`search_sop_docs\` - Search ASI Solutions documentation for processes
+- \`get_sop_process\` - Get specific SOP by process code (e.g., FIN-001)
+- \`search_apps\` - Find available apps to connect to
+- \`auth_connect\` - Generate connection links for apps
+- \`auth_status\` - Check current connection status
+- \`proxy_request\` - Make authenticated API requests
+- \`send_feedback\` - Report issues or request new features
+`;
+
+				return {
+					messages: [
+						{
+							role: "assistant",
+							content: {
+								type: "text",
+								text: instructions.trim(),
+							},
+						},
+					],
+				};
+			},
+		);
+
 		// ---- Helper: GitHub issue creation ----
 		const createGithubIssue = async (
 			title: string,
@@ -894,21 +1088,35 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 			),
 		);
 
-		// -------- auth_apps --------
+		// -------- search_apps --------
 		this.server.tool(
-			"auth_apps",
-			{},
+			"search_apps",
+			{
+				query: z.string().optional().describe("Search term to filter apps by name, slug, description, or domain. Leave empty to list all apps."),
+				limit: z.number().min(1).max(50).optional().describe("Maximum number of results to return (default: 20)"),
+			},
 			this.withSentryInstrumentation(
-				"auth_apps",
+				"search_apps",
 				() => undefined, // no single app
-				async () => {
+				async ({ query, limit }: { query?: string; limit?: number }) => {
 					const pdToken = await getPdAccessToken(this.env);
-					const index = await fetchProxyEnabledApps(this.env, pdToken);
+					const allResults = await searchApps(this.env, pdToken, query);
+					
+					// Apply limit
+					const maxResults = limit || 20;
+					const results = allResults.slice(0, maxResults);
+					
 					return {
 						content: [
 							{
 								type: "text",
-								text: JSON.stringify(index),
+								text: JSON.stringify({
+									query: query || null,
+									total_found: allResults.length,
+									returned: results.length,
+									apps: results,
+									usage_note: "Use the appSlug field with auth_connect to connect to an app"
+								}),
 							},
 						],
 					};
