@@ -66,12 +66,12 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 ### MCP Tools Available
 
 1. **`auth_status`** - Check authentication status for connected apps
-2. **`auth_connect`** - Generate Pipedream Connect Links for OAuth
-3. **`auth_disconnect`** - Remove stored credentials for apps
-4. **`auth_apps`** - List available apps with proxy support
-5. **`proxy_request`** - Make authenticated requests through Pipedream proxy
+2. **`search_apps`** - Search and discover available Pipedream Connect apps by name, slug, description, or domain. **Use this tool first** when a user wants to connect to a service (e.g., "connect me to xero" → search for "xero" → use returned `appSlug` with `auth_connect`)
+3. **`auth_connect`** - Generate Pipedream Connect Links for OAuth (requires exact `appSlug` from `search_apps`)
+4. **`auth_disconnect`** - Remove stored credentials for apps
+5. **`asi_magic_tool`** - Make authenticated requests through Pipedream proxy or direct system APIs. **CRITICAL: Always search and review SOPs using `search_sop_docs` before using this tool to ensure proper procedures are followed.**
 6. **`send_feedback`** - Create GitHub issues for user feedback
-7. **`search_sop_docs`** - Search ASI Solutions SOP documentation on GitHub
+7. **`search_sop_docs`** - Search ASI Solutions SOP documentation on GitHub. **Use this tool before making any API requests with `asi_magic_tool` to understand proper procedures and workflows.**
 8. **`get_sop_process`** - Get specific SOP process by process code
 
 ### Authentication Flow
@@ -84,8 +84,15 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 
 ### API Integration Patterns
 
+**App Discovery and Connection Flow:**
+1. User requests connection: "connect me to xero"
+2. LLM calls `search_apps` with query "xero"  
+3. LLM finds matching app (e.g., `xero_accounting_api`)
+4. LLM calls `auth_connect` with the exact `appSlug`
+5. User follows the OAuth flow via the returned URL
+
 **Pipedream Connect Apps:**
-- Dynamic discovery through Pipedream apps API
+- Dynamic discovery through Pipedream apps API via `search_apps`
 - Proxy-based requests with automatic token injection
 - Support for both static and dynamic app configurations
 - Host-to-app resolution from URL patterns
@@ -142,7 +149,7 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 1. Extend `getSystemAppsConfig()` in `src/index.ts`
 2. Define allowed domains, base URL, and auth configuration
 3. Add environment variable for API credentials
-4. The `proxy_request` tool will automatically handle routing
+4. The `asi_magic_tool` will automatically handle routing
 
 ### Error Handling
 - Use structured error responses with `error` field

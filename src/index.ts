@@ -57,7 +57,7 @@ export interface Env {
 
 // (removed) static host-to-app utility in favor of Pipedream apps index
 
-// (removed) http_request tool and feature flag; rely on proxy_request universally
+// (removed) http_request tool and feature flag; rely on asi_magic_tool universally
 
 // ---- Dynamic Pipedream Apps cache (for host->app detection) ----
 interface PdAppInfo {
@@ -562,7 +562,7 @@ async function proxyRequest(
 	return { status: resp.status, data };
 }
 
-// (removed) Xero tenant helper; proxy_request path is now canonical
+// (removed) Xero tenant helper; asi_magic_tool path is now canonical
 
 // ---- MCP Server class ----
 export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
@@ -1051,20 +1051,20 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 
 		// (removed) http_request tool
 
-		// -------- proxy_request --------
+		// -------- ASI Magic Tool (formerly proxy_request) --------
 		this.server.tool(
-			"proxy_request",
+			"asi_magic_tool",
 			{
-				method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]),
-				url: z.string(),
-				headers: z.record(z.string()).optional(),
-				body: z.union([z.string(), z.record(z.any())]).optional(),
-				account_id: z.string().optional(),
-				app: z.string().optional(),
-				provider: z.enum(["system", "pipedream"]).optional(),
+				method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).describe("HTTP method for the API request"),
+				url: z.string().describe("API endpoint URL. CRITICAL: Before using this tool, ALWAYS search for and review relevant SOPs using search_sop_docs to ensure you follow proper procedures and understand the correct API usage patterns."),
+				headers: z.record(z.string()).optional().describe("Custom HTTP headers for the request"),
+				body: z.union([z.string(), z.record(z.any())]).optional().describe("Request body data (JSON object or string)"),
+				account_id: z.string().optional().describe("Specific account ID to use for authentication"),
+				app: z.string().optional().describe("App slug to use (e.g., 'xero_accounting_api', 'hubspot')"),
+				provider: z.enum(["system", "pipedream"]).optional().describe("Force specific provider (system or pipedream)"),
 			},
 			this.withSentryInstrumentation(
-				"proxy_request",
+				"asi_magic_tool",
 				(args) => {
 					// Try to derive app from args.app or detect from URL
 					if (args.app) return args.app;
@@ -1518,11 +1518,11 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 		this.server.tool(
 			"search_sop_docs",
 			{
-				query: z.string().min(1).max(200),
-				search_type: z.enum(['process', 'quick', 'system', 'sales', 'finance', 'operations', 'support']).optional(),
-				system: z.string().optional(),
-				limit: z.number().min(1).max(20).optional(),
-				include_content: z.boolean().optional(),
+				query: z.string().min(1).max(200).describe("Search query for SOP documentation. CRITICAL: Always search for and review relevant SOPs before using the ASI Magic Tool (asi_magic_tool) to ensure proper procedures are followed."),
+				search_type: z.enum(['process', 'quick', 'system', 'sales', 'finance', 'operations', 'support']).optional().describe("Type of SOP to search for"),
+				system: z.string().optional().describe("Specific system name to search SOPs for (e.g., 'xero', 'hubspot')"),
+				limit: z.number().min(1).max(20).optional().describe("Maximum number of results to return"),
+				include_content: z.boolean().optional().describe("Whether to include full SOP content in results"),
 			},
 			this.withSentryInstrumentation(
 				"search_sop_docs",
