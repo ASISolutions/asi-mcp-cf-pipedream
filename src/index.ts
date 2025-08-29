@@ -385,7 +385,10 @@ function getSystemAppsConfig(env: Env): SystemAppsConfig {
 		auth: {
 			type: "session_cookie",
 		},
-		defaultHeaders: { Accept: "application/json" },
+		defaultHeaders: { 
+			"Accept": "application/json, text/plain, */*",
+			"Content-Type": "application/json"
+		},
 	};
 
 	return [gamma, dickerData];
@@ -491,6 +494,13 @@ async function directSystemRequest(
 					// Add additional headers that Dicker Data expects
 					headers["User-Agent"] =
 						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+					headers["X-Requested-With"] = "XMLHttpRequest";
+					headers["Referer"] = "https://portal.dickerdata.co.nz/";
+					
+					// Override default Accept header with Dicker Data specific format
+					if (!headers["Accept"] || headers["Accept"] === "application/json") {
+						headers["Accept"] = "application/json, text/plain, */*";
+					}
 				} catch (error) {
 					console.error("Dicker Data authentication failed:", error);
 					return {
@@ -514,11 +524,32 @@ async function directSystemRequest(
 	// Body handling
 	let bodyToSend: BodyInit | null = null;
 	if (params.body !== undefined) {
-		if (typeof params.body === "string") {
-			bodyToSend = params.body as string;
+		// Transform payload for Dicker Data API compatibility
+		let processedBody = params.body;
+		if (params.app.appSlug === "dicker_data" && typeof params.body === "object" && params.body !== null) {
+			const body = params.body as Record<string, any>;
+			
+			// Transform user-friendly searchTerm to Dicker Data API format
+			if ("searchTerm" in body) {
+				processedBody = {
+					searchKeyword: body.searchTerm,
+					brand: body.brand || "",
+					type: body.type || "",
+					category: body.category || "",
+					series: body.series || "",
+					minPrice: body.minPrice ? String(body.minPrice) : "",
+					maxPrice: body.maxPrice ? String(body.maxPrice) : "",
+					excludeKits: body.excludeKits || false,
+					minSOH: body.minSOH ? String(body.minSOH) : ""
+				};
+			}
+		}
+		
+		if (typeof processedBody === "string") {
+			bodyToSend = processedBody as string;
 			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
 		} else {
-			bodyToSend = JSON.stringify(params.body);
+			bodyToSend = JSON.stringify(processedBody);
 			if (!headers["Content-Type"])
 				headers["Content-Type"] = "application/json";
 		}
