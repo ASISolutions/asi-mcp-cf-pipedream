@@ -70,9 +70,15 @@ jobs:
             This preview will be automatically updated with new commits to this PR.
             `;
             
-            github.rest.issues.createComment({
-              issue_number: prNumber,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment
-            });
+            try {
+              const result = await github.rest.issues.createComment({
+                issue_number: prNumber,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+              console.log('Comment created successfully:', result.data.html_url);
+            } catch (error) {
+              console.error('Failed to create comment:', error);
+              throw error;
+            }
