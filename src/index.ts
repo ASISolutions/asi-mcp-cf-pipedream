@@ -13,7 +13,7 @@ import { DickerDataAuth } from "./dicker-data-auth";
 export interface Env {
 	// OAuth KV storage
 	OAUTH_KV: KVNamespace;
-	// User data and caching
+	// User data and caching (also used for policy storage)
 	USER_LINKS: KVNamespace;
 
 	// Cloudflare Access OAuth configuration
@@ -470,9 +470,9 @@ function getSystemAppsConfig(env: Env): SystemAppsConfig {
 		auth: {
 			type: "session_cookie",
 		},
-		defaultHeaders: { 
-			"Accept": "application/json, text/plain, */*",
-			"Content-Type": "application/json"
+		defaultHeaders: {
+			Accept: "application/json, text/plain, */*",
+			"Content-Type": "application/json",
 		},
 	};
 
@@ -581,7 +581,7 @@ async function directSystemRequest(
 						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 					headers["X-Requested-With"] = "XMLHttpRequest";
 					headers["Referer"] = "https://portal.dickerdata.co.nz/";
-					
+
 					// Override default Accept header with Dicker Data specific format
 					if (!headers["Accept"] || headers["Accept"] === "application/json") {
 						headers["Accept"] = "application/json, text/plain, */*";
@@ -611,9 +611,13 @@ async function directSystemRequest(
 	if (params.body !== undefined) {
 		// Transform payload for Dicker Data API compatibility
 		let processedBody = params.body;
-		if (params.app.appSlug === "dicker_data" && typeof params.body === "object" && params.body !== null) {
+		if (
+			params.app.appSlug === "dicker_data" &&
+			typeof params.body === "object" &&
+			params.body !== null
+		) {
 			const body = params.body as Record<string, any>;
-			
+
 			// Transform user-friendly searchTerm to Dicker Data API format
 			if ("searchTerm" in body) {
 				processedBody = {
@@ -625,11 +629,11 @@ async function directSystemRequest(
 					minPrice: body.minPrice ? String(body.minPrice) : "",
 					maxPrice: body.maxPrice ? String(body.maxPrice) : "",
 					excludeKits: body.excludeKits || false,
-					minSOH: body.minSOH ? String(body.minSOH) : ""
+					minSOH: body.minSOH ? String(body.minSOH) : "",
 				};
 			}
 		}
-		
+
 		if (typeof processedBody === "string") {
 			bodyToSend = processedBody as string;
 			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
@@ -967,6 +971,252 @@ async function proxyRequest(
 }
 
 // (removed) Xero tenant helper; asi_magic_tool path is now canonical
+
+// ---- URL Access Policy (KV-backed) ----
+
+type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+type Provider = "system" | "pipedream";
+
+interface PolicyRule {
+	id?: string;
+	description?: string;
+	effect: "allow" | "deny";
+	subjects?: {
+		users?: string[]; // exact match on sub or email
+		groups?: string[]; // Cloudflare Access / IdP groups
+	};
+	providers?: (Provider | "*")[];
+	apps?: string[]; // e.g., ["hubspot", "gamma", "dicker_data"] or ["*"]
+	methods?: (HttpMethod | "*")[];
+	hosts?: string[]; // wildcards supported, e.g., ["api.example.com", "*.corp.local"]
+	paths?: string[]; // wildcards supported, e.g., ["/v1/**", "/orders/*/lines"]
+}
+
+interface PolicyDocument {
+	version: string; // e.g., "2025-08-01"
+	defaultMode: "allow" | "deny"; // global default
+	appDefaults?: Record<string, "allow" | "deny">; // per-app default (overrides global)
+	rules: PolicyRule[];
+}
+
+// Optional: in-memory cache
+let IN_MEMORY_POLICY: { expiresAt: number; data: PolicyDocument } | undefined;
+
+// Basic wildcard matcher: "*", "**" and "?" supported
+// Protected against ReDoS with input length limits and simplified patterns
+function wildcardToRegExp(input: string): RegExp {
+	// Prevent ReDoS attacks with input length limit
+	if (input.length > 200) {
+		throw new Error("Pattern too long for security");
+	}
+
+	// Validate input contains only safe characters
+	if (!/^[a-zA-Z0-9.\-_/*?]+$/.test(input)) {
+		throw new Error("Pattern contains unsafe characters");
+	}
+
+	// Escape regex metachars, avoiding catastrophic backtracking
+	let escaped = "";
+	for (let i = 0; i < input.length; i++) {
+		const char = input[i];
+		switch (char) {
+			case "*":
+				if (input[i + 1] === "*") {
+					escaped += ".*?"; // Non-greedy matching to prevent backtracking
+					i++; // Skip next *
+				} else {
+					escaped += "[^/]*?"; // Non-greedy matching
+				}
+				break;
+			case "?":
+				escaped += ".";
+				break;
+			case ".":
+			case "-":
+			case "[":
+			case "]":
+			case "(":
+			case ")":
+			case "^":
+			case "$":
+			case "+":
+			case "{":
+			case "}":
+			case "|":
+			case "\\":
+				escaped += "\\" + char;
+				break;
+			default:
+				escaped += char;
+		}
+	}
+	return new RegExp("^" + escaped + "$");
+}
+
+function matchOne(target: string | undefined, patterns?: string[]): boolean {
+	if (!patterns || patterns.length === 0) return true; // unspecified -> matches all
+	if (!target) return false;
+	return patterns.some((p) => {
+		try {
+			return wildcardToRegExp(p).test(target);
+		} catch {
+			// If pattern is invalid, treat as non-matching for security
+			return false;
+		}
+	});
+}
+
+function matchSet<T extends string>(
+	target: T | undefined,
+	set?: (T | "*")[],
+): boolean {
+	if (!set || set.length === 0) return true;
+	if (!target) return false;
+	return set.includes("*" as any) || set.includes(target);
+}
+
+function normalizePath(p?: string): string | undefined {
+	if (!p) return p;
+	return p.startsWith("/") ? p : "/" + p;
+}
+
+function getIdentityFromProps(props: unknown): {
+	sub?: string;
+	email?: string;
+	groups: string[];
+} {
+	const anyProps = (props || {}) as any;
+	const sub = anyProps?.sub as string | undefined;
+	const email = anyProps?.email as string | undefined;
+
+	// Try common locations/names for groups claims.
+	const groupsCandidates: unknown[] = [
+		anyProps?.groups,
+		anyProps?.roles,
+		anyProps?.entitlements,
+		anyProps?.["https://cloudflareaccess.com/claims/groups"],
+	];
+	const groups: string[] =
+		(groupsCandidates.find((g) => Array.isArray(g)) as string[] | undefined) ||
+		[];
+
+	return { sub, email, groups };
+}
+
+async function loadPolicy(env: Env): Promise<PolicyDocument> {
+	const now = Date.now();
+	if (IN_MEMORY_POLICY && IN_MEMORY_POLICY.expiresAt > now) {
+		return IN_MEMORY_POLICY.data;
+	}
+	let raw: string | null = null;
+	try {
+		raw = await env.USER_LINKS.get("mcp:policy:v1");
+	} catch {}
+	let policy: PolicyDocument;
+
+	if (raw) {
+		try {
+			policy = JSON.parse(raw) as PolicyDocument;
+		} catch {
+			// corrupt KV -> safe default
+			policy = { version: "default", defaultMode: "deny", rules: [] };
+		}
+	} else {
+		// default if not configured yet (least privilege)
+		policy = { version: "default", defaultMode: "deny", rules: [] };
+	}
+
+	IN_MEMORY_POLICY = { expiresAt: now + 60_000, data: policy }; // 60s cache
+	return policy;
+}
+
+// Evaluate request against policy
+async function evaluatePolicy(
+	env: Env,
+	input: {
+		sub?: string;
+		email?: string;
+		groups: string[];
+		provider: Provider;
+		app?: string;
+		method: HttpMethod;
+		host?: string;
+		path?: string;
+		fullUrl?: string;
+	},
+): Promise<{
+	allow: boolean;
+	matchedRule?: PolicyRule & { index?: number };
+	decision: "allow" | "deny" | "default";
+	reason?: string;
+}> {
+	const policy = await loadPolicy(env);
+	const { sub, email, groups, provider, app, method, host, path } = input;
+
+	// Helper: does this rule apply to the subject?
+	const subjectMatches = (r: PolicyRule): boolean => {
+		const s = r.subjects;
+		if (!s) return true;
+		const users = s.users || [];
+		const groupsRule = s.groups || [];
+		const userIdMatches =
+			users.length === 0 ||
+			users.includes(sub || "") ||
+			users.includes(email || "");
+		const groupMatches =
+			groupsRule.length === 0 || groupsRule.some((g) => groups.includes(g));
+		return userIdMatches && groupMatches;
+	};
+
+	// Compute app default (if present)
+	const appDefault =
+		(app && policy.appDefaults && policy.appDefaults[app]) || undefined;
+
+	// Collect matching rules (provider/app/method/host/path AND subject)
+	const pathNorm = normalizePath(path);
+	const matches = (r: PolicyRule) =>
+		subjectMatches(r) &&
+		matchSet(provider, r.providers as any) &&
+		matchOne(app, r.apps) &&
+		matchSet(method, r.methods as any) &&
+		matchOne(host, r.hosts) &&
+		matchOne(pathNorm, r.paths);
+
+	const matched = policy.rules
+		.map((r, i) => ({ r, i }))
+		.filter(({ r }) => matches(r));
+
+	// Deny overrides allow
+	const deny = matched.find(({ r }) => r.effect === "deny");
+	if (deny) {
+		return {
+			allow: false,
+			matchedRule: { ...deny.r, index: deny.i },
+			decision: "deny",
+			reason: "Matched explicit deny rule",
+		};
+	}
+	const allow = matched.find(({ r }) => r.effect === "allow");
+	if (allow) {
+		return {
+			allow: true,
+			matchedRule: { ...allow.r, index: allow.i },
+			decision: "allow",
+			reason: "Matched explicit allow rule",
+		};
+	}
+
+	// Fall back to per-app default, then global default
+	const fallback: "allow" | "deny" = appDefault || policy.defaultMode;
+	return {
+		allow: fallback === "allow",
+		decision: "default",
+		reason:
+			fallback === "allow"
+				? "No matching rule; allowed by default policy"
+				: "No matching rule; denied by default policy",
+	};
+}
 
 // ---- MCP Server class ----
 export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
@@ -1485,20 +1735,20 @@ ${
 					limit?: number;
 				}) => {
 					const pdToken = await getPdAccessToken(this.env);
-					
+
 					// Build URL with query parameters per Pipedream API docs
 					let url = "https://api.pipedream.com/v1/apps";
 					const params = new URLSearchParams();
-					
+
 					// Use the 'q' parameter for general search as per API docs
 					if (query) {
 						params.set("q", query);
 					}
-					
+
 					if (params.toString()) {
 						url += "?" + params.toString();
 					}
-					
+
 					// Fetch apps from Pipedream with query parameters
 					// Note: x-pd-environment header causes "record not found" - remove it for global app search
 					const res = await fetch(url, {
@@ -1690,6 +1940,57 @@ ${
 								],
 							};
 						}
+
+						// Get identity once
+						const { sub, email, groups } = getIdentityFromProps(this.props);
+
+						// Build final URL (absolute) for policy evaluation
+						let policyUrl = url;
+						try {
+							policyUrl = buildSystemUrl(url, selectedSystemApp);
+						} catch {}
+						let host: string | undefined, pathOnly: string | undefined;
+						try {
+							const u = new URL(policyUrl);
+							host = u.hostname;
+							pathOnly = u.pathname;
+						} catch {}
+
+						const decision = await evaluatePolicy(this.env, {
+							sub,
+							email,
+							groups,
+							provider: "system",
+							app: selectedSystemApp.appSlug,
+							method,
+							host,
+							path: pathOnly,
+							fullUrl: policyUrl,
+						});
+
+						if (!decision.allow) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											error: "blocked_by_policy",
+											message: "This request was blocked by policy.",
+											reason: decision.reason,
+											matched_rule: decision.matchedRule,
+											context: {
+												provider: "system",
+												app: selectedSystemApp.appSlug,
+												method,
+												host,
+												path: pathOnly,
+											},
+										}),
+									},
+								],
+							};
+						}
+
 						const sysResult = await directSystemRequest(this.env, {
 							method,
 							url,
@@ -1745,6 +2046,56 @@ ${
 
 					// Prefer system app if available and no explicit account_id or provider override
 					if (!account_id && !provider && selectedSystemApp) {
+						// Get identity once
+						const { sub, email, groups } = getIdentityFromProps(this.props);
+
+						// Build final URL (absolute) for policy evaluation
+						let policyUrl = url;
+						try {
+							policyUrl = buildSystemUrl(url, selectedSystemApp);
+						} catch {}
+						let host: string | undefined, pathOnly: string | undefined;
+						try {
+							const u = new URL(policyUrl);
+							host = u.hostname;
+							pathOnly = u.pathname;
+						} catch {}
+
+						const decision = await evaluatePolicy(this.env, {
+							sub,
+							email,
+							groups,
+							provider: "system",
+							app: selectedSystemApp.appSlug,
+							method,
+							host,
+							path: pathOnly,
+							fullUrl: policyUrl,
+						});
+
+						if (!decision.allow) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											error: "blocked_by_policy",
+											message: "This request was blocked by policy.",
+											reason: decision.reason,
+											matched_rule: decision.matchedRule,
+											context: {
+												provider: "system",
+												app: selectedSystemApp.appSlug,
+												method,
+												host,
+												path: pathOnly,
+											},
+										}),
+									},
+								],
+							};
+						}
+
 						const sysResult = await directSystemRequest(this.env, {
 							method,
 							url,
@@ -1882,6 +2233,58 @@ ${
 								processedHeaders[key] = value;
 							}
 						}
+					}
+
+					// Get identity once
+					const { sub, email, groups } = getIdentityFromProps(this.props);
+
+					// Resolve host/path for policy. If URL is relative (dynamic app), host may be unknown.
+					const isFullUrlNow = /^https?:\/\//i.test(url);
+					let host: string | undefined, pathOnly: string | undefined;
+					if (isFullUrlNow) {
+						try {
+							const u = new URL(url);
+							host = u.hostname;
+							pathOnly = u.pathname;
+						} catch {}
+					} else {
+						// relative path; rely on path-only policy for dynamic apps
+						pathOnly = url.startsWith("/") ? url : "/" + url;
+					}
+
+					const decision = await evaluatePolicy(this.env, {
+						sub,
+						email,
+						groups,
+						provider: "pipedream",
+						app: resolvedApp!,
+						method,
+						host,
+						path: pathOnly,
+						fullUrl: url,
+					});
+
+					if (!decision.allow) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "blocked_by_policy",
+										message: "This request was blocked by policy.",
+										reason: decision.reason,
+										matched_rule: decision.matchedRule,
+										context: {
+											provider: "pipedream",
+											app: resolvedApp,
+											method,
+											host,
+											path: pathOnly,
+										},
+									}),
+								},
+							],
+						};
 					}
 
 					// Add nested span for the actual HTTP request (with fallback)
