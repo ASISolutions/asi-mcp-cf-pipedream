@@ -6,6 +6,79 @@ import {
 } from "./workers-oauth-utils";
 
 /**
+ * Validates and sanitizes tenant ID to prevent collisions and injection
+ */
+function validateTenantId(tenantId: string): string {
+	const cleaned = tenantId.toLowerCase().replace(/[^a-z0-9-]/g, "");
+	if (cleaned.length === 0 || cleaned.length > 50) {
+		throw new Error("Invalid tenant ID format");
+	}
+	// Prevent reserved names
+	const reserved = ["www", "api", "admin", "default", "system", "internal"];
+	if (reserved.includes(cleaned)) {
+		return `tenant-${cleaned}`;
+	}
+	return cleaned;
+}
+
+/**
+ * Derives tenant ID from URL hostname or Access claims with collision prevention
+ */
+function deriveTenantId(requestUrl: string, claims: any): string {
+	try {
+		// Priority 1: Explicit org claims from Access
+		if (claims.org_id) {
+			return validateTenantId(claims.org_id);
+		}
+		if (claims.organization) {
+			return validateTenantId(claims.organization);
+		}
+
+		// Priority 2: Hostname-based with collision prevention
+		const hostname = new URL(requestUrl).hostname.toLowerCase();
+		const parts = hostname.split(".");
+
+		if (parts.length >= 3) {
+			const subdomain = parts[0];
+			if (subdomain.length >= 3 && subdomain !== "www") {
+				// Handle Cloudflare Workers URLs (*.*.workers.dev)
+				if (
+					parts[parts.length - 2] === "workers" &&
+					parts[parts.length - 1] === "dev"
+				) {
+					// For "asi-mcp.asi-cloud.workers.dev" → just use "asi-mcp"
+					return validateTenantId(subdomain);
+				}
+
+				// For custom domains like "acme.mcp.example.com"
+				// Include second level for uniqueness: "acme-mcp"
+				const secondLevel = parts[1];
+				if (secondLevel && secondLevel !== "mcp") {
+					return validateTenantId(`${subdomain}-${secondLevel}`);
+				}
+				return validateTenantId(subdomain);
+			}
+		}
+
+		// Priority 3: Email domain with TLD for uniqueness
+		const email = claims.email || "";
+		if (email.includes("@")) {
+			const domain = email.split("@")[1];
+			if (domain) {
+				// Use full domain to prevent collisions: "acme.com" vs "acme.co.uk"
+				return validateTenantId(domain.replace(/\./g, "-"));
+			}
+		}
+
+		// Fallback
+		return "default";
+	} catch (error) {
+		console.warn("Tenant ID derivation failed:", error);
+		return "default";
+	}
+}
+
+/**
  * Default handler used by OAuthProvider. It implements the /authorize UI endpoint
  * and uses Cloudflare Access as the SSO layer. After Access authenticates the user,
  * this handler completes the OAuth flow by calling env.OAUTH_PROVIDER.completeAuthorization().
@@ -105,10 +178,15 @@ export default {
 			const userId = String(
 				claims.sub || claims.email || claims.user_id || "unknown",
 			);
+
+			// Derive tenant_id from hostname or Access claims with collision prevention
+			const tenant_id = deriveTenantId(request.url, claims);
+
 			const props = {
 				sub: userId,
 				email: claims.email || "",
 				name: claims.name || claims.common_name || "",
+				tenant_id,
 				access: {
 					id_token: tokens.id_token,
 					expires_in: tokens.expires_in,
