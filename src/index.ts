@@ -3602,37 +3602,7 @@ const provider = new OAuthProvider({
 	apiHandlers: {
 		"/mcp": ASIConnectMCP.serve("/mcp") as any,
 		"/sse": ASIConnectMCP.serveSSE("/sse") as any,
-		// Add auth page handlers as ExportedHandler objects
-		"/auth/success": {
-			fetch: async () => {
-				return new Response(authSuccessHtml, {
-					headers: {
-						"Content-Type": "text/html",
-						"Cache-Control": "public, max-age=3600",
-					},
-				});
-			},
-		},
-		"/auth/failure": {
-			fetch: async () => {
-				return new Response(authFailureHtml, {
-					headers: {
-						"Content-Type": "text/html",
-						"Cache-Control": "public, max-age=3600",
-					},
-				});
-			},
-		},
-		"/signup": {
-			fetch: async () => {
-				return new Response(signupHtml, {
-					headers: {
-						"Content-Type": "text/html",
-						"Cache-Control": "public, max-age=3600",
-					},
-				});
-			},
-		},
+		// Only protected routes should be in apiHandlers
 		"/dashboard": {
 			fetch: async (request, env) => {
 				return new Response(dashboardHtml, {
