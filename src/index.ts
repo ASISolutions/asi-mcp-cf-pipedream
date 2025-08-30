@@ -1072,7 +1072,7 @@ ${
 		);
 
 		// -------- assistant_instructions resource --------
-		this.server.resource("assistant_instructions", async () => {
+		this.server.resource("assistant_instructions", "Get assistant instructions as a resource", async () => {
 			const external_user_id = this.getExternalUserId();
 			const pdToken = await getPdAccessToken(this.env);
 
@@ -1388,7 +1388,7 @@ ${
 					if (!res.ok)
 						throw new Error(`Pipedream apps search error ${res.status}`);
 					const body = (await res.json()) as { data?: PdAppInfo[] };
-					let allApps = body.data || [];
+					const allApps = body.data || [];
 
 					// Apply additional client-side filters for parameters not supported by API
 					let filteredApps = allApps;
@@ -2250,7 +2250,7 @@ function scrubEvent(event: Sentry.Event): Sentry.Event {
 		if (!obj || typeof obj !== "object") return;
 		for (const k of Object.keys(obj)) {
 			if (
-				/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret)/i.test(
+				/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|key)/i.test(
 					k,
 				)
 			) {
@@ -2260,10 +2260,35 @@ function scrubEvent(event: Sentry.Event): Sentry.Event {
 			}
 		}
 	};
+
+	// Redact sensitive data from all parts of the event
 	redact((event as any).request);
 	redact(event.contexts);
 	redact(event.extra);
 	redact((event as any).breadcrumbs);
+	
+	// Also scrub log messages for sensitive content
+	if (event.message) {
+		event.message = event.message.replace(
+			/(token|password|secret|key)\s*[=:]\s*[^\s]+/gi,
+			'$1=[redacted]'
+		);
+	}
+
+	// Scrub breadcrumb messages
+	if (event.breadcrumbs) {
+		event.breadcrumbs = event.breadcrumbs.map(breadcrumb => {
+			if (breadcrumb.message) {
+				breadcrumb.message = breadcrumb.message.replace(
+					/(token|password|secret|key)\s*[=:]\s*[^\s]+/gi,
+					'$1=[redacted]'
+				);
+			}
+			redact(breadcrumb.data);
+			return breadcrumb;
+		});
+	}
+
 	return event;
 }
 
@@ -2408,6 +2433,98 @@ const provider = new OAuthProvider({
 	scopesSupported: ["openid", "email", "profile"],
 });
 
+// Custom console wrapper to ensure all logs reach Sentry
+function wrapConsoleForSentry() {
+	const originalConsole = {
+		log: console.log,
+		error: console.error,
+		warn: console.warn,
+		info: console.info,
+		debug: console.debug,
+	};
+
+	// Wrap console methods to also send to Sentry as messages
+	console.log = (...args) => {
+		originalConsole.log(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'info',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.info = (...args) => {
+		originalConsole.info(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'info',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.warn = (...args) => {
+		originalConsole.warn(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'warning',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.error = (...args) => {
+		originalConsole.error(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'error',
+					category: 'console',
+				});
+				// Also capture errors as Sentry events for visibility
+				const errorMessage = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+				Sentry.captureMessage(errorMessage, 'error');
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.debug = (...args) => {
+		originalConsole.debug(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'debug',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	return originalConsole;
+}
+
 // Helper to safely wrap with Sentry or fallback gracefully
 function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
 	return {
@@ -2420,6 +2537,14 @@ function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
 				return (provider as any).fetch(request, env, ctx);
 			}
 
+			// Wrap console methods to ensure all logs reach Sentry
+			wrapConsoleForSentry();
+
+			// Log startup with Sentry integration
+			console.log(`🚀 ASI MCP Server starting with Sentry integration enabled`);
+			console.log(`📊 Sentry Environment: ${env.SENTRY_ENV ?? env.PIPEDREAM_ENV}`);
+			console.log(`🔢 Release: ${env.CF_VERSION_METADATA?.id || 'dev'}`);
+
 			try {
 				// Try to wrap with Sentry
 				const sentryWrapped = Sentry.withSentry(
@@ -2431,10 +2556,25 @@ function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
 							release: versionId,
 							// capture headers/IP (you can set this false if you prefer)
 							sendDefaultPii: true,
-							// Logs: forwards console.* to Sentry Logs
+							// Enhanced logging configuration
 							enableLogs: true,
+							// Capture all log levels (debug, info, warn, error)
+							logLevels: ['debug', 'info', 'warn', 'error'],
+							// Send console.* calls immediately without batching delays
+							beforeBreadcrumb: (breadcrumb) => {
+								// Enhance console breadcrumbs with more context
+								if (breadcrumb.category === 'console') {
+									breadcrumb.level = breadcrumb.level || 'info';
+									breadcrumb.timestamp = Date.now() / 1000;
+								}
+								return breadcrumb;
+							},
 							// Tracing: 100% since volume is low (tune later)
 							tracesSampleRate: 1.0,
+							// Capture more breadcrumbs to provide better context
+							maxBreadcrumbs: 100,
+							// Enable debug mode for development
+							debug: env.SENTRY_ENV === 'development',
 							// Belt & suspenders token-scrubber
 							beforeSend: scrubEvent as any,
 						};
