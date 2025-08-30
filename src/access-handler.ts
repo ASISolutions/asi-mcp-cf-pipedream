@@ -105,10 +105,24 @@ export default {
 			const userId = String(
 				claims.sub || claims.email || claims.user_id || "unknown",
 			);
+
+			// Derive tenant_id from hostname (e.g., "acme.mcp.example.com" → "acme")
+			// or from Access claims (e.g., email domain, organization)
+			const tenantFromHost = new URL(request.url).hostname.split(".")[0];
+			const tenantFromEmail = (claims.email || "").split("@")[1]?.split(".")[0];
+			const tenant_id = (
+				claims.org_id ||
+				claims.organization ||
+				tenantFromHost ||
+				tenantFromEmail ||
+				"default"
+			).toLowerCase();
+
 			const props = {
 				sub: userId,
 				email: claims.email || "",
 				name: claims.name || claims.common_name || "",
+				tenant_id,
 				access: {
 					id_token: tokens.id_token,
 					expires_in: tokens.expires_in,

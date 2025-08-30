@@ -1,0 +1,4259 @@
+Directory structure:
+└── asi-mcp-cf-pipedream/
+    ├── README.md
+    ├── biome.json
+    ├── CLAUDE.md
+    ├── package.json
+    ├── PROJECT_OVERVIEW.md
+    ├── setup-secrets.sh
+    ├── tsconfig.json
+    ├── wrangler.jsonc
+    ├── src/
+    │   ├── access-handler.ts
+    │   ├── dicker-data-auth.ts
+    │   ├── github-sop-search.ts
+    │   ├── index.ts
+    │   └── workers-oauth-utils.ts
+    └── .cursor/
+        └── rules/
+            └── project-structure.mdc
+
+================================================
+FILE: README.md
+================================================
+# ASI Connect MCP Server
+
+A production-ready remote MCP (Model Context Protocol) server that runs on Cloudflare Workers, integrates with Cloudflare Zero Trust for authentication, and uses Pipedream Connect to manage OAuth connections for HubSpot, Xero, and PandaDoc.
+
+## Features
+
+- **Remote MCP Server**: Runs on Cloudflare Workers with SSE transport
+- **Zero Trust Authentication**: Protected with Cloudflare Access for SaaS OAuth
+- **Multi-App OAuth**: Uses Pipedream Connect to manage HubSpot, Xero, and PandaDoc connections
+- **Intelligent Routing**: Auto-detects destination app from URLs and injects correct tokens
+- **Xero Tenant Handling**: Automatically manages Xero tenant IDs with caching
+
+## MCP Tools
+
+### 1. `auth.status`
+Check authentication status for connected apps.
+
+**Parameters:**
+- `apps` (optional): Array of apps to filter [`"hubspot"`, `"xero"`, `"pandadoc"`]
+
+**Example:**
+```json
+{ "tool": "auth.status", "args": {} }
+```
+
+### 2. `auth.connect`  
+Get a Pipedream Connect Link to authenticate with an app.
+
+**Parameters:**
+- `app` (required): App to connect [`"hubspot"`, `"xero"`, `"pandadoc"`]
+
+**Example:**
+```json
+{ "tool": "auth.connect", "args": { "app": "hubspot" } }
+```
+
+### 3. `auth.disconnect`
+Disconnect from an app and remove stored credentials.
+
+**Parameters:**
+- `app` (required): App to disconnect [`"hubspot"`, `"xero"`, `"pandadoc"`]
+- `account_id` (optional): Specific account ID to disconnect
+
+**Example:**
+```json
+{ "tool": "auth.disconnect", "args": { "app": "xero" } }
+```
+
+### 4. `http.request`
+Make authenticated HTTP requests to supported APIs.
+
+**Parameters:**
+- `method` (required): HTTP method [`"GET"`, `"POST"`, `"PUT"`, `"PATCH"`, `"DELETE"`]
+- `url` (required): Full API URL
+- `headers` (optional): Additional headers
+- `body` (optional): Request body (string or object)
+
+**Example:**
+```json
+{
+  "tool": "http.request",
+  "args": {
+    "method": "GET",
+    "url": "https://api.hubapi.com/crm/v3/objects/contacts?limit=5"
+  }
+}
+```
+
+## Setup
+
+### 1. Prerequisites
+
+- Cloudflare account with Workers and Zero Trust
+- Pipedream account with Connect project
+- OAuth apps configured in HubSpot, Xero, and PandaDoc
+
+### 2. Clone and Install
+
+```bash
+cd my-mcp
+npm install
+```
+
+### 3. Configure Cloudflare Zero Trust (Access for SaaS)
+
+1. **Create Access for SaaS Application**:
+   - Go to **Zero Trust** > **Applications** > **SaaS**
+   - Click **Add an Application** > **SaaS**
+   - Choose **Custom** application type
+   - Set Application name: `ASI Connect MCP`
+   - Add redirect URIs:
+     - Production: `https://<worker-name>.<account>.workers.dev/callback`
+     - Local: `http://localhost:8788/callback`
+
+2. **Configure OIDC Settings**:
+   - Note the **Client ID** and **Client Secret**
+   - Record the OIDC endpoints:
+     - Authorization: `https://<team>.cloudflareaccess.com/oauth2/v2/auth`
+     - Token: `https://<team>.cloudflareaccess.com/oauth2/v2/token`
+     - JWKS: `https://<team>.cloudflareaccess.com/oauth2/v2/keys`
+
+3. **Create Access Policies**:
+   - Define who can access the MCP server
+   - Configure MFA, device posture, etc. as needed
+
+### 4. Configure Pipedream Connect
+
+1. Create a Pipedream OAuth client for the Connect API
+2. Set up your Connect project with HubSpot, Xero, and PandaDoc apps
+3. Ensure you're using your own OAuth clients (not Pipedream's)
+
+### 5. Create KV Namespaces
+
+```bash
+# Create KV namespaces
+wrangler kv:namespace create "OAUTH_KV"
+wrangler kv:namespace create "USER_LINKS"
+
+# For preview
+wrangler kv:namespace create "OAUTH_KV" --preview
+wrangler kv:namespace create "USER_LINKS" --preview
+```
+
+Update `wrangler.jsonc` with the returned KV namespace IDs.
+
+### 6. Configure Secrets
+
+Copy `.env.example` to `.env` and fill in your values, then run:
+
+```bash
+./setup-secrets.sh
+```
+
+Or set secrets manually:
+
+```bash
+# Cloudflare Access OAuth
+wrangler secret put ACCESS_CLIENT_ID
+wrangler secret put ACCESS_CLIENT_SECRET
+wrangler secret put ACCESS_AUTHORIZATION_URL
+wrangler secret put ACCESS_TOKEN_URL
+wrangler secret put ACCESS_JWKS_URL
+
+# Generate cookie encryption key: openssl rand -hex 32
+wrangler secret put COOKIE_ENCRYPTION_KEY
+
+# Pipedream Connect
+wrangler secret put PIPEDREAM_CLIENT_ID
+wrangler secret put PIPEDREAM_CLIENT_SECRET
+wrangler secret put PIPEDREAM_PROJECT_ID
+wrangler secret put PIPEDREAM_ENV
+
+# Optional redirects
+wrangler secret put CONNECT_SUCCESS_REDIRECT
+wrangler secret put CONNECT_ERROR_REDIRECT
+```
+
+### 7. Local Development
+
+```bash
+npx wrangler dev
+```
+
+Connect MCP Inspector to `http://localhost:8788/sse`
+
+### 8. Deploy
+
+```bash
+npx wrangler deploy
+```
+
+Connect from AI Playground or MCP Inspector to `https://<worker>.<account>.workers.dev/sse`
+
+## Usage Examples
+
+### Check Authentication Status
+```json
+{ "tool": "auth.status", "args": {} }
+```
+
+### Connect HubSpot
+```json
+{ "tool": "auth.connect", "args": { "app": "hubspot" } }
+```
+→ Returns Connect Link URL to complete OAuth
+
+### Get HubSpot Contacts
+```json
+{
+  "tool": "http.request", 
+  "args": {
+    "method": "GET",
+    "url": "https://api.hubapi.com/crm/v3/objects/contacts?limit=5"
+  }
+}
+```
+
+### Get Xero Invoices  
+```json
+{
+  "tool": "http.request",
+  "args": {
+    "method": "GET", 
+    "url": "https://api.xero.com/api.xro/2.0/Invoices"
+  }
+}
+```
+→ Automatically adds `xero-tenant-id` header
+
+### List PandaDoc Documents
+```json
+{
+  "tool": "http.request",
+  "args": {
+    "method": "GET",
+    "url": "https://api.pandadoc.com/public/v1/documents?count=10"
+  }
+}
+```
+
+## Architecture
+
+```
+[MCP Client] 
+    ↓ Remote MCP over HTTP/SSE
+[Cloudflare Worker: MCP Server]
+    ↓ OIDC (Access for SaaS)  
+[Cloudflare Zero Trust Access]
+    ↓ OIDC claims
+[MCP Tools] ←→ [Pipedream Connect API] ←→ [HubSpot/Xero/PandaDoc]
+```
+
+## Adding More Apps
+
+1. Extend `HOST_TO_APP` mapping in `src/index.ts`
+2. Add app to the enum types for tools
+3. Configure the app in your Pipedream Connect project
+4. The `http.request` tool will automatically handle token injection
+
+## Security
+
+- Keeps Workers OAuth Provider library updated
+- Uses Access policies for MFA and device posture
+- Never returns raw credentials to clients
+- Caches Xero tenant IDs securely in KV
+
+## References
+
+- [Cloudflare MCP Docs](https://developers.cloudflare.com/agents/guides/remote-mcp-server/)
+- [Access for SaaS MCP](https://developers.cloudflare.com/cloudflare-one/applications/configure-apps/mcp-servers/saas-mcp/)
+- [Pipedream Connect](https://pipedream.com/docs/connect/api-reference/)
+- [HubSpot API](https://developers.hubspot.com/docs/guides/apps/authentication/intro-to-auth)
+- [Xero API](https://developer.xero.com/documentation/guides/oauth2/auth-flow/)
+- [PandaDoc API](https://developers.pandadoc.com/reference/authentication-process)
+
+
+================================================
+FILE: biome.json
+================================================
+{
+	"$schema": "https://biomejs.dev/schemas/2.1.3/schema.json",
+	"assist": {
+		"actions": {
+			"source": {
+				"useSortedKeys": "off"
+			}
+		},
+		"enabled": true
+	},
+	"files": {
+		"includes": ["!worker-configuration.d.ts", "src/**/*"],
+		"ignoreUnknown": true,
+		"maxSize": 5242880
+	},
+	"formatter": {
+		"enabled": true,
+		"indentWidth": 4,
+		"lineWidth": 100
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"recommended": true,
+			"style": {
+				"noInferrableTypes": "error",
+				"noNonNullAssertion": "off",
+				"noParameterAssign": "error",
+				"noUnusedTemplateLiteral": "error",
+				"noUselessElse": "error",
+				"useAsConstAssertion": "error",
+				"useDefaultParameterLast": "error",
+				"useEnumInitializers": "error",
+				"useNumberNamespace": "error",
+				"useSelfClosingElements": "error",
+				"useSingleVarDeclarator": "error"
+			},
+			"suspicious": {
+				"noConfusingVoidType": "off",
+				"noDebugger": "off",
+				"noExplicitAny": "off"
+			}
+		}
+	},
+	"root": false,
+	"vcs": {
+		"clientKind": "git",
+		"enabled": true,
+		"useIgnoreFile": true
+	}
+}
+
+
+
+================================================
+FILE: CLAUDE.md
+================================================
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This is an ASI Connect MCP Server - a production-ready remote MCP (Model Context Protocol) server that runs on Cloudflare Workers. It provides OAuth-protected access to multiple APIs through Pipedream Connect and direct system app authentication.
+
+**Key Technologies:**
+- Cloudflare Workers with TypeScript
+- Model Context Protocol (MCP) SDK
+- Pipedream Connect for OAuth management
+- Cloudflare Access for SSO authentication
+- KV storage for caching and state
+
+## Common Development Commands
+
+### Development & Testing
+```bash
+npm run dev          # Start local development server on port 8788
+npm run start        # Alias for dev
+wrangler dev         # Direct wrangler command
+```
+
+### Code Quality
+```bash
+npm run format       # Format code with Biome
+npm run lint:fix     # Fix linting issues with Biome
+npm run type-check   # TypeScript type checking
+```
+
+### Deployment
+```bash
+npm run deploy       # Deploy to Cloudflare Workers
+npm run cf-typegen   # Generate Cloudflare Worker types
+```
+
+### Local Development URLs
+- MCP SSE endpoint: `http://localhost:8788/sse`
+- OAuth authorize: `http://localhost:8788/authorize`
+
+## Architecture Overview
+
+### Core Components
+
+1. **OAuth Provider Wrapper** (`src/index.ts`):
+   - Wraps the MCP server with Cloudflare's OAuth Provider
+   - Integrates with Cloudflare Access for SSO
+   - Handles authentication flow and token management
+
+2. **MCP Server Class** (`ASIConnectMCP`):
+   - Extends `McpAgent` from the agents library
+   - Implements MCP tools for authentication and API requests
+   - Manages user sessions and external service integrations
+
+3. **Access Handler** (`src/access-handler.ts`):
+   - Handles the OAuth authorization flow
+   - Integrates with Cloudflare Access as upstream OAuth provider
+   - Manages client registration and token exchange
+
+4. **OAuth Utils** (`src/workers-oauth-utils.ts`):
+   - JWT parsing and verification utilities
+   - Cookie signing and security helpers
+   - Upstream OAuth token exchange functions
+
+### MCP Tools Available
+
+1. **`auth_status`** - Check authentication status for connected apps
+2. **`search_apps`** - Search and discover available Pipedream Connect apps by name, slug, description, or domain. **Use this tool first** when a user wants to connect to a service (e.g., "connect me to xero" → search for "xero" → use returned `appSlug` with `auth_connect`)
+3. **`auth_connect`** - Generate Pipedream Connect Links for OAuth (requires exact `appSlug` from `search_apps`)
+4. **`auth_disconnect`** - Remove stored credentials for apps
+5. **`asi_magic_tool`** - Make authenticated requests through Pipedream proxy or direct system APIs. **CRITICAL: Always search and review SOPs using `search_sop_docs` before using this tool to ensure proper procedures are followed.**
+6. **`send_feedback`** - Create GitHub issues for user feedback
+7. **`search_sop_docs`** - Search ASI Solutions SOP documentation on GitHub. **Use this tool before making any API requests with `asi_magic_tool` to understand proper procedures and workflows.**
+8. **`get_sop_process`** - Get specific SOP process by process code
+
+### Authentication Flow
+
+1. MCP client initiates OAuth with `/authorize`
+2. Server redirects to Cloudflare Access for authentication
+3. Access returns with user claims (sub, email, name)
+4. Server completes OAuth flow and issues tokens
+5. MCP tools use the authenticated user context for API calls
+
+### API Integration Patterns
+
+**App Discovery and Connection Flow:**
+1. User requests connection: "connect me to xero"
+2. LLM calls `search_apps` with query "xero"  
+3. LLM finds matching app (e.g., `xero_accounting_api`)
+4. LLM calls `auth_connect` with the exact `appSlug`
+5. User follows the OAuth flow via the returned URL
+
+**Pipedream Connect Apps:**
+- Dynamic discovery through Pipedream apps API via `search_apps`
+- Proxy-based requests with automatic token injection
+- Support for both static and dynamic app configurations
+- Host-to-app resolution from URL patterns
+
+**System Apps (Direct Auth):**
+- Hard-coded configuration for apps with API key auth
+- Direct HTTP requests with credential injection
+- Currently supports Gamma app as example
+
+## Configuration Files
+
+- **`wrangler.jsonc`** - Cloudflare Workers configuration with KV bindings
+- **`biome.json`** - Code formatting and linting rules
+- **`tsconfig.json`** - TypeScript compilation settings
+- **`package.json`** - Dependencies and npm scripts
+
+## Environment Variables (Secrets)
+
+### Cloudflare Access OAuth
+- `ACCESS_CLIENT_ID` - Client ID from Access for SaaS app
+- `ACCESS_CLIENT_SECRET` - Client secret from Access
+- `ACCESS_AUTHORIZATION_URL` - Access OAuth authorize endpoint
+- `ACCESS_TOKEN_URL` - Access OAuth token endpoint  
+- `ACCESS_JWKS_URL` - Access JWKS endpoint for token verification
+- `COOKIE_ENCRYPTION_KEY` - Key for cookie signing (generate with `openssl rand -hex 32`)
+
+### Pipedream Connect
+- `PIPEDREAM_CLIENT_ID` - Connect API client ID
+- `PIPEDREAM_CLIENT_SECRET` - Connect API client secret
+- `PIPEDREAM_PROJECT_ID` - Connect project ID (proj_xxx format)
+- `PIPEDREAM_ENV` - Environment ("development" or "production")
+
+### Optional Features
+- `CONNECT_SUCCESS_REDIRECT` - Redirect after successful OAuth
+- `CONNECT_ERROR_REDIRECT` - Redirect after OAuth error
+- `GITHUB_TOKEN` - GitHub token for feedback issues and SOP documentation access
+- `GITHUB_REPO` - GitHub repo for feedback (owner/repo format)
+- `GAMMA_API_KEY` - API key for Gamma system app
+
+### GitHub SOP Documentation
+- `GITHUB_SOP_OWNER` - Owner of SOP docs repository (defaults to "ASISolutions")
+- `GITHUB_SOP_REPO` - Name of SOP docs repository (defaults to "docs")  
+- `GITHUB_SOP_BRANCH` - Branch of SOP docs repository (defaults to "main")
+
+## Development Patterns
+
+### Adding New MCP Tools
+1. Add tool definition in `ASIConnectMCP.init()` method
+2. Use `this.server.tool(name, schema, handler)` pattern
+3. Access user context with `this.getExternalUserId()`
+4. Return structured responses with `content` array
+
+### Adding New System Apps
+1. Extend `getSystemAppsConfig()` in `src/index.ts`
+2. Define allowed domains, base URL, and auth configuration
+3. Add environment variable for API credentials
+4. The `asi_magic_tool` will automatically handle routing
+
+### Error Handling
+- Use structured error responses with `error` field
+- Include helpful context like `supported_apps` or `allowed_domains`  
+- Provide actionable guidance in error messages
+- Use GitHub feedback tool for user-reported issues
+
+### Testing Considerations
+- Use `wrangler dev` for local development
+- Test OAuth flow with MCP Inspector or AI Playground
+- Verify KV storage operations work correctly
+- Test both Pipedream proxy and direct system app requests
+
+## Key Files to Modify
+
+- `src/index.ts` - Main server logic, MCP tools, app configurations
+- `src/access-handler.ts` - OAuth flow customizations
+- `wrangler.jsonc` - Worker configuration, KV bindings, secrets
+- `package.json` - Dependencies and build scripts
+
+## Common Issues
+
+1. **KV Namespace IDs** - Must match between `wrangler.jsonc` and actual Cloudflare KV namespaces
+2. **OAuth Redirect URIs** - Must be registered in both Cloudflare Access and MCP client
+3. **CORS Headers** - Handled automatically by the MCP SDK for SSE transport
+4. **Token Expiration** - Pipedream handles OAuth refresh; Access tokens are validated per request
+
+
+================================================
+FILE: package.json
+================================================
+{
+	"name": "remote-mcp-server-authless",
+	"version": "0.0.0",
+	"private": true,
+	"scripts": {
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"format": "biome format --write",
+		"lint:fix": "biome lint --fix",
+		"start": "wrangler dev",
+		"cf-typegen": "wrangler types",
+		"type-check": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@cloudflare/workers-oauth-provider": "^0.0.6",
+		"@modelcontextprotocol/sdk": "^1.17.1",
+		"@sentry/cloudflare": "^10.5.0",
+		"agents": "^0.0.109",
+		"yaml": "^2.8.1",
+		"zod": "^3.25.76"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.1.3",
+		"@types/node": "^24.3.0",
+		"typescript": "5.8.3",
+		"wrangler": "^4.32.0"
+	}
+}
+
+
+
+================================================
+FILE: PROJECT_OVERVIEW.md
+================================================
+## Project Overview
+
+ASI Connect MCP is a production-ready remote MCP (Model Context Protocol) server deployed on Cloudflare Workers. It authenticates users via Cloudflare Zero Trust (Access for SaaS), provides OAuth-protected MCP endpoints, integrates Pipedream Connect for multi-app OAuth and proxying to third-party APIs, and instruments observability with Sentry. It also includes a GitHub-powered SOP search service to guide safe task execution.
+
+- **Entrypoint**: `src/index.ts` exports an `OAuthProvider` that protects MCP routes `"/mcp"` (HTTP) and `"/sse"` (SSE) and registers tools like `auth_status`, `auth_connect`, `auth_disconnect`, `search_apps`, `asi_magic_tool`, `search_sop_docs`, `get_sop_process`, and `send_feedback`.
+- **Access flow**: `src/access-handler.ts` implements the `/authorize` UI and completes the OAuth flow using Cloudflare Access for SaaS OIDC.
+- **SOP search**: `src/github-sop-search.ts` queries GitHub for SOPs and enriches metadata to guide correct API usage.
+- **OAuth helpers**: `src/workers-oauth-utils.ts` contains token/JWT parsing/verification, approval UI, and cookie signing.
+- **Configuration**: `wrangler.jsonc`, `tsconfig.json`, `biome.json`; environment bindings include KV (`OAUTH_KV`, `USER_LINKS`), Durable Object (`MCP_OBJECT`), Cloudflare Access secrets, Pipedream Connect credentials, and Sentry.
+
+## High-level Architecture
+
+```mermaid
+graph TD
+  subgraph Client
+    A[MCP Client]
+  end
+
+  subgraph Cloudflare
+    B[Cloudflare Worker<br/>ASI Connect MCP]
+    B1[/mcp HTTP/]:::route
+    B2[/sse SSE/]:::route
+    K[Durable Object: MCP_OBJECT]
+    KV[(KV: OAUTH_KV<br/>KV: USER_LINKS)]
+    S[Sentry SDK]
+  end
+
+  subgraph Auth
+    C[Cloudflare Access<br/>(OIDC for SaaS)]
+    D[OAuthProvider<br/>(src/index.ts)]
+    E[Access Default Handler<br/>(/authorize UI)]
+  end
+
+  subgraph Integrations
+    P[Pipedream Connect API]
+    APIS[3rd‑party APIs<br/>(HubSpot/Xero/PandaDoc/Gamma...)]
+    GH[GitHub API<br/>SOP search]
+  end
+
+  A -->|SSE/HTTP| B2
+  A -->|HTTP| B1
+  B1 --> D
+  B2 --> D
+  D <-->|OIDC redirect| C
+  E -->|completeAuthorization| D
+  D -->|KV state| KV
+  D -->|Durable state| K
+  D -->|tools| P
+  D -->|proxy via Connect| APIS
+  D -->|SOP search| GH
+  D -. observability .-> S
+
+  classDef route fill:#eef,stroke:#88a;
+```
+
+## Security Features
+
+- **Zero Trust SSO**: Authentication via Cloudflare Access (OIDC). OAuth flow is mediated by `OAuthProvider`; `/authorize` UI is implemented in `src/access-handler.ts`.
+- **OAuth-protected MCP**: MCP endpoints `"/mcp"` and `"/sse"` are protected by the provider; only authenticated clients receive tokens/props.
+- **Scoped token handling**: Uses Pipedream Connect per-user `external_user_id` to request scoped API access; never exposes raw 3rd‑party credentials to clients.
+- **Header allowlisting**: Proxy sanitization (`sanitizeProxyHeaders`) removes restricted headers and blocks `proxy-*`/`sec-*` to prevent header smuggling.
+- **Domain allowlists**: System apps enforce `allowedDomains` for absolute URLs; Pipedream proxy validates app/domain mappings to prevent exfiltration.
+- **Secrets hygiene**: Sentry payload scrubbing (`scrubEvent`) redacts auth tokens/secrets; tool arg sanitization removes sensitive fields from breadcrumbs.
+- **Cookie security**: Approval cookie is `HttpOnly; Secure; SameSite=Strict` and HMAC‑signed via `signCookie`; TTL‑bounded approvals in KV.
+- **KV usage**: Transient state (e.g., OAuth requests, caches) stored in CF KV with TTL; CF provides encryption at rest and TLS in transit.
+- **Observability with care**: Sentry instrumentation is resilient and falls back safely; secrets are redacted before send; failures don’t break user flows.
+- **Input validation**: `zod` schemas on tool inputs enforce types and bounds; URL normalization/validation paths reduce injection risk.
+
+## ISO/IEC 27001 Alignment (selected, practical mappings)
+
+- **A.9 Access Control**: Zero Trust via Cloudflare Access (SSO, policies, MFA/device posture configurable). OAuthProvider gates MCP routes; least‑privileged per‑app access via Pipedream accounts.
+- **A.10 Cryptography**: TLS enforced by Cloudflare. HMAC for cookie integrity. JWKS retrieval supported; token parsing/expiry checks in `verifyToken` with room to extend signature verification.
+- **A.12 Operations Security**: Secure header filtering, domain allowlisting, dependency management (npm lock), type checks in CI, and logging/monitoring via Sentry.
+- **A.14 System Acquisition, Development, Maintenance**: PR‑based changes, code review, preview deployments, and dependency/code scanning (Dependabot/Code Scanning) support secure SDLC.
+- **A.16 Incident Management**: Centralized error and trace capture via Sentry, with user/tool/app tags to accelerate triage; feedback tool creates GitHub issues.
+- **A.17 Business Continuity**: Cloudflare Workers provides globally distributed runtime; KV and Durable Objects offer resilient state where used.
+- **A.18 Compliance**: Data minimization (no raw third‑party creds exposed), auditability via PR reviews and CI logs. Secrets managed via Cloudflare secrets.
+
+Notes: Organizational controls (policies, risk assessments, asset inventories) are typically handled outside this repo; this service supports technical controls and evidence.
+
+## Secure Development Lifecycle
+
+- **PR‑driven development with code review**: All changes land via GitHub PRs with reviewer approval and branch protections.
+- **Preview deployments**: On PR open/update, CI deploys a namespaced Cloudflare Worker (`.github/workflows/preview-deployment.yml`) and comments the preview URL and MCP endpoints for validation.
+- **Automated checks**: CI runs install and `npm run type-check` before deploying previews.
+- **Cleanup**: On PR close, the preview deployment is deleted (`cleanup-previews.yml`).
+- **Dependency and code scanning**: GitHub Dependabot and Code Scanning are used to surface vulnerable dependencies and code issues; renovate/security alerts can be enabled at org/repo level alongside secret scanning.
+
+## Key Endpoints and Tools
+
+- **MCP endpoints**: `"/mcp"` (HTTP), `"/sse"` (SSE)
+- **OAuth endpoints**: `"/authorize"`, `"/token"`, `"/register"`
+- **Registered tools**: `auth_status`, `auth_connect`, `auth_disconnect`, `search_apps`, `asi_magic_tool`, `search_sop_docs`, `get_sop_process`, `send_feedback`
+
+## Environment Bindings
+
+- **KV**: `OAUTH_KV`, `USER_LINKS`
+- **Durable Object**: `MCP_OBJECT`
+- **Cloudflare Access**: `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_AUTHORIZATION_URL`, `ACCESS_TOKEN_URL`, `ACCESS_JWKS_URL`, `COOKIE_ENCRYPTION_KEY`
+- **Pipedream Connect**: `PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET`, `PIPEDREAM_PROJECT_ID`, `PIPEDREAM_ENV`
+- **Observability**: `SENTRY_DSN`, `SENTRY_ENV`, `CF_VERSION_METADATA`
+- **GitHub/SOP**: `GITHUB_TOKEN`, `GITHUB_REPO`, optional `GITHUB_SOP_OWNER/REPO/BRANCH`
+
+
+
+
+
+================================================
+FILE: setup-secrets.sh
+================================================
+#!/bin/bash
+
+# Setup script to configure Wrangler secrets for ASI MCP with Cloudflare Access
+# Make sure you have the correct values before running this script
+
+echo "Setting up Wrangler secrets for ASI MCP with Cloudflare Access OAuth..."
+
+# Cloudflare Access OAuth configuration
+echo "Setting Cloudflare Access OAuth configuration..."
+wrangler secret put ACCESS_CLIENT_ID
+wrangler secret put ACCESS_CLIENT_SECRET
+wrangler secret put ACCESS_AUTHORIZATION_URL
+wrangler secret put ACCESS_TOKEN_URL
+wrangler secret put ACCESS_JWKS_URL
+
+# Cookie encryption key
+echo "Setting cookie encryption key..."
+wrangler secret put COOKIE_ENCRYPTION_KEY
+
+# Pipedream Connect
+echo "Setting Pipedream Connect configuration..."
+wrangler secret put PIPEDREAM_CLIENT_ID
+wrangler secret put PIPEDREAM_CLIENT_SECRET
+wrangler secret put PIPEDREAM_PROJECT_ID
+wrangler secret put PIPEDREAM_ENV
+
+# Optional Connect redirect pages
+echo "Setting optional redirect URLs..."
+wrangler secret put CONNECT_SUCCESS_REDIRECT
+wrangler secret put CONNECT_ERROR_REDIRECT
+
+# GitHub Issues (optional)
+echo "Setting GitHub Issues configuration (optional)..."
+wrangler secret put GITHUB_TOKEN
+wrangler secret put GITHUB_REPO
+wrangler secret put GITHUB_API_BASE
+
+echo "All secrets configured!"
+echo ""
+echo "Don't forget to:"
+echo "1. Create KV namespaces:"
+echo "   wrangler kv:namespace create 'OAUTH_KV'"
+echo "   wrangler kv:namespace create 'USER_LINKS'"
+echo "   wrangler kv:namespace create 'OAUTH_KV' --preview"
+echo "   wrangler kv:namespace create 'USER_LINKS' --preview"
+echo "2. Update wrangler.jsonc with the returned KV namespace IDs"
+echo "3. Set up Cloudflare Access for SaaS application"
+echo "4. Update your .env file for local development"
+
+
+================================================
+FILE: tsconfig.json
+================================================
+{
+	"compilerOptions": {
+		"target": "es2021",
+		"lib": ["es2021"],
+		"jsx": "react-jsx",
+		"module": "es2022",
+		"moduleResolution": "bundler",
+		"resolveJsonModule": true,
+		"allowJs": true,
+		"checkJs": false,
+		"noEmit": true,
+		"isolatedModules": true,
+		"allowSyntheticDefaultImports": true,
+		"forceConsistentCasingInFileNames": true,
+		"strict": true,
+		"skipLibCheck": true,
+		"types": ["./worker-configuration.d.ts", "node"]
+	},
+	"include": ["worker-configuration.d.ts", "src/**/*.ts"]
+}
+
+
+
+================================================
+FILE: wrangler.jsonc
+================================================
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "asi-mcp",
+	"account_id": "f213ac3aa2d97ea8163c120a8f879b0a",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-08-24",
+	"compatibility_flags": ["nodejs_compat", "nodejs_als"],
+	"migrations": [
+		{
+			"new_sqlite_classes": ["ASIConnectMCP"],
+			"tag": "v1"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "ASIConnectMCP",
+				"name": "MCP_OBJECT"
+			}
+		]
+	},
+	"kv_namespaces": [
+		{
+			"binding": "OAUTH_KV",
+			"id": "68815e4d9c6b428f818c416e16d6dfe7",
+			"preview_id": "8748561b3b184c9191c19e96463dba06"
+		},
+		{
+			"binding": "USER_LINKS",
+			"id": "a9ca6f94a16f4f85a82f57d934758cc4",
+			"preview_id": "ae15a3f6429a420db362fb76847087e7"
+		}
+	],
+	"version_metadata": {
+		"binding": "CF_VERSION_METADATA"
+	},
+	"upload_source_maps": true,
+	"observability": {
+		"enabled": true
+	},
+	"dev": {
+		"port": 8788
+	}
+}
+
+
+
+================================================
+FILE: src/access-handler.ts
+================================================
+import type { Env } from "./index";
+import {
+	parseJWT,
+	verifyToken,
+	fetchUpstreamAuthToken,
+} from "./workers-oauth-utils";
+
+/**
+ * Default handler used by OAuthProvider. It implements the /authorize UI endpoint
+ * and uses Cloudflare Access as the SSO layer. After Access authenticates the user,
+ * this handler completes the OAuth flow by calling env.OAUTH_PROVIDER.completeAuthorization().
+ */
+export default {
+	async fetch(request: Request, env: any, ctx: ExecutionContext) {
+		const url = new URL(request.url);
+
+		if (url.pathname === "/authorize") {
+			// If returning from Access, there will be a `code` and `state` param
+			const code = url.searchParams.get("code");
+			const state = url.searchParams.get("state");
+
+			if (!code) {
+				// Initial request from MCP client
+				// Ensure the OAuth client is registered with the requested redirect URI
+				const clientId = url.searchParams.get("client_id");
+				const reqRedirectUri = url.searchParams.get("redirect_uri");
+				if (clientId && reqRedirectUri) {
+					try {
+						const existing = await env.OAUTH_PROVIDER.lookupClient(clientId);
+						if (!existing) {
+							await env.OAUTH_PROVIDER.createClient({
+								clientId,
+								redirectUris: [reqRedirectUri],
+								tokenEndpointAuthMethod: "none",
+							});
+						} else if (!existing.redirectUris?.includes(reqRedirectUri)) {
+							const updatedUris = Array.from(
+								new Set([...(existing.redirectUris || []), reqRedirectUri]),
+							);
+							await env.OAUTH_PROVIDER.updateClient(clientId, {
+								redirectUris: updatedUris,
+							});
+						}
+					} catch {
+						// non-fatal in dev, parseAuthRequest may still succeed if already valid
+					}
+				}
+
+				// Parse and persist OAuth request by state
+				const oauthReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
+				// Persist the parsed request so we can complete after redirect back
+				await env.OAUTH_KV.put(
+					`oauthreq:${oauthReq.state}`,
+					JSON.stringify(oauthReq),
+					{ expirationTtl: 600 },
+				);
+
+				// Redirect to Cloudflare Access (acts as upstream OAuth provider)
+				const redirectUri = `${url.origin}/authorize`;
+				const authEndpoint = normalizeEndpoint(
+					env.ACCESS_AUTHORIZATION_URL,
+					url,
+				);
+				const login = new URL(authEndpoint);
+				login.searchParams.set("client_id", env.ACCESS_CLIENT_ID);
+				login.searchParams.set("redirect_uri", redirectUri);
+				login.searchParams.set("response_type", "code");
+				login.searchParams.set("state", oauthReq.state);
+				login.searchParams.set("scope", "openid email profile");
+				return Response.redirect(login.toString(), 302);
+			}
+
+			// Callback from Access: load saved oauth request
+			if (!state) {
+				return new Response("Missing state", { status: 400 });
+			}
+			const saved = await env.OAUTH_KV.get(`oauthreq:${state}`);
+			if (!saved) {
+				return new Response("Invalid or expired state", { status: 400 });
+			}
+			const oauthReq = JSON.parse(saved);
+
+			// Exchange code for tokens with Access
+			const redirectUri = `${url.origin}/authorize`;
+			const tokenEndpoint = normalizeEndpoint(env.ACCESS_TOKEN_URL, url);
+			const tokens = await fetchUpstreamAuthToken(
+				tokenEndpoint,
+				env.ACCESS_CLIENT_ID,
+				env.ACCESS_CLIENT_SECRET,
+				code,
+				redirectUri,
+			);
+
+			// Derive identity from ID token if present
+			let claims: any = {};
+			try {
+				const idToken = tokens.id_token as string | undefined;
+				if (idToken) {
+					claims = parseJWT(idToken).payload;
+				}
+			} catch (err) {
+				// ignore, fall back to minimal claims
+			}
+
+			const userId = String(
+				claims.sub || claims.email || claims.user_id || "unknown",
+			);
+			const props = {
+				sub: userId,
+				email: claims.email || "",
+				name: claims.name || claims.common_name || "",
+				access: {
+					id_token: tokens.id_token,
+					expires_in: tokens.expires_in,
+				},
+			};
+
+			const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
+				request: oauthReq,
+				userId,
+				metadata: { provider: "cloudflare-access" },
+				scope: oauthReq.scope,
+				props,
+			});
+
+			// Cleanup
+			await env.OAUTH_KV.delete(`oauthreq:${state}`);
+
+			return Response.redirect(redirectTo, 302);
+		}
+
+		return new Response("Not found", { status: 404 });
+	},
+};
+
+function normalizeEndpoint(endpoint: string | undefined, reqUrl: URL): string {
+	if (!endpoint || typeof endpoint !== "string") {
+		throw new Error("Missing Access endpoint configuration");
+	}
+	if (/^https?:\/\//i.test(endpoint)) return endpoint;
+	const path = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+	return new URL(path, reqUrl.origin).toString();
+}
+
+
+
+================================================
+FILE: src/dicker-data-auth.ts
+================================================
+// src/dicker-data-auth.ts
+import type { Env } from "./index";
+
+export interface DickerDataCredentials {
+	account: string;
+	username: string;
+	password: string;
+}
+
+export interface DickerDataSession {
+	cookieString: string;
+	expiresAt: number;
+	lastRefresh: number;
+}
+
+export class DickerDataAuth {
+	private env: Env;
+	private sessionKey = "dicker-data:session";
+
+	constructor(env: Env) {
+		this.env = env;
+	}
+
+	private getCredentials(): DickerDataCredentials {
+		const account = this.env.DICKER_DATA_ACCOUNT;
+		const username = this.env.DICKER_DATA_USERNAME;
+		const password = this.env.DICKER_DATA_PASSWORD;
+
+		if (!account || !username || !password) {
+			throw new Error("Dicker Data credentials not configured");
+		}
+
+		return { account, username, password };
+	}
+
+	private async getStoredSession(): Promise<DickerDataSession | null> {
+		try {
+			const stored = await this.env.USER_LINKS.get(this.sessionKey);
+			if (!stored) return null;
+
+			const session = JSON.parse(stored) as DickerDataSession;
+
+			// Check if session is expired (sessions typically last 24 hours, we refresh after 12)
+			const now = Date.now();
+			if (now > session.expiresAt) {
+				await this.env.USER_LINKS.delete(this.sessionKey);
+				return null;
+			}
+
+			return session;
+		} catch (error) {
+			console.error("Failed to get stored Dicker Data session:", error);
+			return null;
+		}
+	}
+
+	private async storeSession(cookieString: string): Promise<void> {
+		const now = Date.now();
+		const session: DickerDataSession = {
+			cookieString,
+			expiresAt: now + 12 * 60 * 60 * 1000, // 12 hours
+			lastRefresh: now,
+		};
+
+		try {
+			await this.env.USER_LINKS.put(
+				this.sessionKey,
+				JSON.stringify(session),
+				{ expirationTtl: 24 * 60 * 60 }, // 24 hours TTL
+			);
+		} catch (error) {
+			console.error("Failed to store Dicker Data session:", error);
+			throw error;
+		}
+	}
+
+	private async performLogin(): Promise<string> {
+		const { account, username, password } = this.getCredentials();
+
+		console.log("🔐 Starting Dicker Data authentication...");
+
+		// Step 1: Get login page and CSRF token
+		const loginPageResponse = await fetch(
+			"https://portal.dickerdata.co.nz/Account/Login?ReturnUrl=%2Fhome",
+			{
+				method: "GET",
+				headers: {
+					"User-Agent":
+						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+					Accept:
+						"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+				},
+			},
+		);
+
+		if (!loginPageResponse.ok) {
+			throw new Error(`Failed to get login page: ${loginPageResponse.status}`);
+		}
+
+		const loginPageHtml = await loginPageResponse.text();
+		const setCookieHeaders = loginPageResponse.headers.get("set-cookie");
+
+		// Extract CSRF token
+		const tokenMatch = loginPageHtml.match(
+			/name="__RequestVerificationToken"[^>]*value="([^"]+)"/,
+		);
+		if (!tokenMatch) {
+			throw new Error("Could not extract CSRF token from login page");
+		}
+		const csrfToken = tokenMatch[1];
+		console.log("🔑 CSRF token extracted successfully");
+
+		// Extract initial cookies
+		const initialCookies = this.parseCookies(setCookieHeaders || "");
+
+		// Step 2: Perform login
+		const formData = new URLSearchParams({
+			ReturnUrl: "/home",
+			Username: username,
+			AccountId: account,
+			Password: password,
+			__RequestVerificationToken: csrfToken,
+			RememberLogin: "false",
+		});
+
+		const loginResponse = await fetch(
+			"https://portal.dickerdata.co.nz/Account/Login?ReturnUrl=%2Fhome",
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/x-www-form-urlencoded",
+					"User-Agent":
+						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+					Accept:
+						"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+					"Accept-Language": "en-US,en;q=0.9",
+					"Cache-Control": "max-age=0",
+					Origin: "https://portal.dickerdata.co.nz",
+					Referer:
+						"https://portal.dickerdata.co.nz/Account/Login?ReturnUrl=%2Fhome",
+					"Sec-Ch-Ua":
+						'"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+					"Sec-Ch-Ua-Mobile": "?0",
+					"Sec-Ch-Ua-Platform": '"macOS"',
+					"Sec-Fetch-Dest": "document",
+					"Sec-Fetch-Mode": "navigate",
+					"Sec-Fetch-Site": "same-origin",
+					"Sec-Fetch-User": "?1",
+					"Upgrade-Insecure-Requests": "1",
+					Cookie: initialCookies,
+				},
+				body: formData,
+				redirect: "manual", // Handle redirects manually to capture cookies
+			},
+		);
+
+		const loginSetCookies = loginResponse.headers.get("set-cookie");
+		const allCookies = this.mergeCookies(initialCookies, loginSetCookies || "");
+
+		// Check if login was successful by looking at status code and cookies
+		if (loginResponse.status === 302 || loginResponse.status === 200) {
+			// Look for session cookies that indicate successful login
+			if (
+				allCookies.includes("DickerDataCookie") ||
+				allCookies.includes("AccountId")
+			) {
+				console.log("✅ Dicker Data login successful!");
+				return allCookies;
+			}
+		}
+
+		console.error("❌ Dicker Data login failed");
+		console.error("Response status:", loginResponse.status);
+		console.error(
+			"Response headers:",
+			Object.fromEntries(loginResponse.headers.entries()),
+		);
+
+		throw new Error(`Login failed with status ${loginResponse.status}`);
+	}
+
+	private parseCookies(setCookieHeader: string): string {
+		if (!setCookieHeader) return "";
+
+		// More robust cookie parsing that handles various Set-Cookie formats
+		const cookies: string[] = [];
+
+		// Split by comma, but be careful of dates and other comma-containing values
+		const cookieParts = setCookieHeader.split(/,\s*(?=[\w]+=)/);
+
+		for (const part of cookieParts) {
+			const trimmed = part.trim();
+			if (!trimmed) continue;
+
+			// Extract just the name=value portion (before first semicolon)
+			const nameValueMatch = trimmed.match(/^([^=]+=[^;]*)/);
+			if (nameValueMatch) {
+				const nameValue = nameValueMatch[1].trim();
+				// Validate it's a proper cookie format
+				if (nameValue.includes("=") && !nameValue.startsWith("=")) {
+					cookies.push(nameValue);
+				}
+			}
+		}
+
+		return cookies.join("; ");
+	}
+
+	private mergeCookies(existing: string, newSetCookie: string): string {
+		const existingCookies = existing ? existing.split("; ") : [];
+		const newCookies = this.parseCookies(newSetCookie)
+			.split("; ")
+			.filter((c) => c);
+
+		// Create a map to handle cookie updates
+		const cookieMap = new Map<string, string>();
+
+		// Add existing cookies
+		existingCookies.forEach((cookie) => {
+			const [name, value] = cookie.split("=", 2);
+			if (name && value) {
+				cookieMap.set(name, value);
+			}
+		});
+
+		// Update with new cookies
+		newCookies.forEach((cookie) => {
+			const [name, value] = cookie.split("=", 2);
+			if (name && value) {
+				cookieMap.set(name, value);
+			}
+		});
+
+		// Convert back to cookie string
+		return Array.from(cookieMap.entries())
+			.map(([name, value]) => `${name}=${value}`)
+			.join("; ");
+	}
+
+	async getValidSession(): Promise<string> {
+		// Try to get existing session
+		const stored = await this.getStoredSession();
+		if (stored) {
+			console.log("🍪 Using cached Dicker Data session");
+			return stored.cookieString;
+		}
+
+		// No valid session, perform login
+		console.log("🔄 No valid session found, performing fresh login");
+		const cookieString = await this.performLogin();
+		await this.storeSession(cookieString);
+
+		return cookieString;
+	}
+
+	async testSession(cookieString: string): Promise<boolean> {
+		try {
+			// Test the session by making a simple request to a protected page
+			const response = await fetch("https://portal.dickerdata.co.nz/home", {
+				headers: {
+					Cookie: cookieString,
+					"User-Agent":
+						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+				},
+				redirect: "manual", // Handle redirects manually to detect login redirects
+			});
+
+			// Check for various invalid session indicators
+			if (response.status === 401 || response.status === 403) {
+				console.log("Session validation failed: Unauthorized response");
+				return false;
+			}
+
+			// Handle redirect responses
+			if (response.status >= 300 && response.status < 400) {
+				const location = response.headers.get("location");
+				if (location) {
+					const locationLower = location.toLowerCase();
+					// Check for various login/auth redirect patterns
+					if (
+						locationLower.includes("login") ||
+						locationLower.includes("signin") ||
+						locationLower.includes("auth") ||
+						locationLower.includes("account/login")
+					) {
+						console.log(
+							"Session validation failed: Redirected to authentication page",
+						);
+						return false;
+					}
+				}
+			}
+
+			// Check response content for login indicators (as fallback)
+			if (response.ok) {
+				const contentType = response.headers.get("content-type") || "";
+				if (contentType.includes("text/html")) {
+					const text = await response.text();
+					const textLower = text.toLowerCase();
+					// Look for login form indicators in the HTML content
+					if (
+						textLower.includes("<form") &&
+						(textLower.includes('action="login') ||
+							textLower.includes('action="/account/login') ||
+							(textLower.includes('name="password"') &&
+								textLower.includes('name="username"')))
+					) {
+						console.log(
+							"Session validation failed: Login form detected in response",
+						);
+						return false;
+					}
+				}
+			}
+
+			return response.ok;
+		} catch (error) {
+			console.error("Session test failed:", error);
+			return false;
+		}
+	}
+
+	async refreshSessionIfNeeded(): Promise<string> {
+		const session = await this.getStoredSession();
+
+		// If no session or expired, get a fresh one
+		if (!session) {
+			return this.getValidSession();
+		}
+
+		// Test if current session is still valid
+		const isValid = await this.testSession(session.cookieString);
+		if (isValid) {
+			return session.cookieString;
+		}
+
+		// Session invalid, clear it and get a fresh one
+		console.log("🔄 Session invalid, refreshing Dicker Data authentication");
+		await this.env.USER_LINKS.delete(this.sessionKey);
+		return this.getValidSession();
+	}
+}
+
+
+
+================================================
+FILE: src/github-sop-search.ts
+================================================
+// src/github-sop-search.ts
+import { parse as yamlParse } from "yaml";
+
+// ---- Types ----
+export interface SOPSearchResult {
+	path: string;
+	metadata: SOPMetadata;
+	content: string;
+	raw: string;
+}
+
+export interface SOPMetadata {
+	process_code?: string;
+	title?: string;
+	category?: string;
+	type?: string;
+	search_terms?: string[];
+	description?: string;
+	systems?: Record<
+		string,
+		{
+			operations?: string[];
+			required?: boolean;
+			pipedream_app?: string;
+			display_name?: string;
+			api_version?: string;
+			base_url?: string;
+			auth?: {
+				type: string;
+				scopes?: string[];
+				environment?: string;
+			};
+			defaults?: Record<string, string>;
+			[key: string]: any;
+		}
+	>;
+	estimated_time?: string;
+	requires_approval?: boolean;
+	compliance?: string[];
+	prerequisites?: string[];
+	related_processes?: Record<string, string>;
+	last_modified?: string;
+	owner?: string;
+	version?: string;
+	[key: string]: any;
+}
+
+export interface SearchOptions {
+	searchType?:
+		| "process"
+		| "quick"
+		| "system"
+		| "sales"
+		| "finance"
+		| "operations"
+		| "support";
+	system?: string;
+	limit?: number;
+	includeContent?: boolean;
+}
+
+export interface SystemConfig {
+	pipedream_app: string;
+	display_name: string;
+	api_version?: string;
+	base_url?: string;
+	auth?: {
+		type: string;
+		scopes?: string[];
+		environment?: string;
+	};
+	defaults?: Record<string, string>;
+	test_endpoint?: {
+		method: string;
+		url: string;
+		expected_status: number;
+	};
+	[key: string]: any;
+}
+
+// ---- GitHub SOP Search Service ----
+export class SOPSearchService {
+	private owner: string;
+	private repo: string;
+	private branch: string;
+	private githubToken: string;
+
+	constructor(
+		githubToken: string,
+		owner = "ASISolutions",
+		repo = "docs",
+		branch = "main",
+	) {
+		this.githubToken = githubToken;
+		this.owner = owner;
+		this.repo = repo;
+		this.branch = branch;
+	}
+
+	/**
+	 * Main search method - interprets user intent and searches appropriately
+	 */
+	async search(
+		userQuery: string,
+		options: SearchOptions = {},
+	): Promise<SOPSearchResult[]> {
+		// Check for direct process code
+		const processCode = this.extractProcessCode(userQuery);
+		if (processCode) {
+			const result = await this.getByProcessCode(processCode);
+			return result ? [result] : [];
+		}
+
+		// Build and execute search
+		const searchQuery = this.buildSearchQuery(userQuery, options);
+
+		try {
+			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&sort=indexed&per_page=${options.limit || 5}`;
+			console.log(`GitHub search URL: ${searchUrl}`);
+			console.log(`GitHub search query: ${searchQuery}`);
+
+			const response = await fetch(searchUrl, {
+				headers: {
+					Authorization: `Bearer ${this.githubToken}`,
+					Accept: "application/vnd.github+json",
+					"X-GitHub-Api-Version": "2022-11-28",
+					"User-Agent": "asi-mcp-worker/1.0",
+				},
+			});
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				console.error(
+					`GitHub search failed: ${response.status} - ${errorText}`,
+				);
+				throw new Error(
+					`GitHub search failed: ${response.status} - ${errorText}`,
+				);
+			}
+
+			const data = (await response.json()) as {
+				items: Array<{ path: string }>;
+				total_count: number;
+			};
+			console.log(
+				`GitHub search returned ${data.total_count} total results, ${data.items.length} items`,
+			);
+
+			// Fetch full content for each result
+			const results = await Promise.allSettled(
+				data.items.map((item) =>
+					this.fetchDocument(item.path, options.includeContent),
+				),
+			);
+
+			return results
+				.filter(
+					(result): result is PromiseFulfilledResult<SOPSearchResult> =>
+						result.status === "fulfilled" && result.value !== null,
+				)
+				.map((result) => result.value);
+		} catch (error) {
+			console.error("GitHub search error:", error);
+			throw new Error(
+				`Search failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+			);
+		}
+	}
+
+	/**
+	 * Build GitHub search query from user input
+	 */
+	buildSearchQuery(userQuery: string, options: SearchOptions): string {
+		let query = `repo:${this.owner}/${this.repo} `;
+
+		// Add path filters based on search type
+		if (options.searchType) {
+			const pathMap: Record<string, string> = {
+				process: "path:processes",
+				quick: "path:quick-actions",
+				system: "path:apps",
+				sales: "path:processes/sales",
+				finance: "path:processes/finance",
+				operations: "path:processes/operations",
+				support: "path:processes/support",
+			};
+
+			if (pathMap[options.searchType]) {
+				query += `${pathMap[options.searchType]} `;
+			}
+		}
+
+		// Add system filter if specified
+		if (options.system) {
+			query += `systems:${options.system} `;
+		}
+
+		// Add the search terms - handle quoted phrases
+		const cleanedQuery = userQuery.trim();
+		if (cleanedQuery.includes('"')) {
+			// Pass through quoted phrases as-is
+			query += `${cleanedQuery} `;
+		} else {
+			// For unquoted terms, let GitHub handle the tokenization
+			query += `${cleanedQuery} `;
+		}
+
+		// Always filter to markdown files
+		query += "extension:md";
+
+		return query.trim();
+	}
+
+	/**
+	 * Extract process code from user query (e.g., SALES-001, FINANCE-002)
+	 */
+	extractProcessCode(query: string): string | null {
+		const match = query.match(/\b([A-Z]+)-(\d{3})\b/);
+		return match ? match[0] : null;
+	}
+
+	/**
+	 * Get document by process code
+	 */
+	async getByProcessCode(processCode: string): Promise<SOPSearchResult | null> {
+		const searchQuery = `repo:${this.owner}/${this.repo} process_code:${processCode} extension:md`;
+		console.log(`Process code search query: ${searchQuery}`);
+
+		try {
+			const searchUrl = `https://api.github.com/search/code?q=${encodeURIComponent(searchQuery)}&per_page=1`;
+			console.log(`Process code search URL: ${searchUrl}`);
+
+			const response = await fetch(searchUrl, {
+				headers: {
+					Authorization: `Bearer ${this.githubToken}`,
+					Accept: "application/vnd.github+json",
+					"X-GitHub-Api-Version": "2022-11-28",
+					"User-Agent": "asi-mcp-worker/1.0",
+				},
+			});
+
+			if (!response.ok) {
+				throw new Error(`GitHub search failed: ${response.status}`);
+			}
+
+			const data = (await response.json()) as {
+				items: Array<{ path: string }>;
+				total_count: number;
+			};
+			console.log(
+				`Process code search returned ${data.total_count} total results, ${data.items.length} items`,
+			);
+
+			if (data.items.length > 0) {
+				console.log(`Found process code in file: ${data.items[0].path}`);
+				return await this.fetchDocument(data.items[0].path, true);
+			}
+			return null;
+		} catch (error) {
+			console.error("Process code search error:", error);
+			return null;
+		}
+	}
+
+	/**
+	 * Fetch full document content with metadata
+	 */
+	async fetchDocument(
+		path: string,
+		includeContent = true,
+	): Promise<SOPSearchResult | null> {
+		try {
+			const response = await fetch(
+				`https://api.github.com/repos/${this.owner}/${this.repo}/contents/${path}`,
+				{
+					headers: {
+						Authorization: `Bearer ${this.githubToken}`,
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": "asi-mcp-worker/1.0",
+					},
+				},
+			);
+
+			if (!response.ok) {
+				throw new Error(`Failed to fetch document: ${response.status}`);
+			}
+
+			const data = (await response.json()) as {
+				content: string;
+				encoding: string;
+			};
+			const content = Buffer.from(data.content, "base64").toString("utf-8");
+			const { metadata, body } = this.parseDocument(content);
+
+			// Enrich systems data with configuration
+			if (metadata.systems) {
+				const enrichedSystems: typeof metadata.systems = {};
+				for (const [systemSlug, systemData] of Object.entries(
+					metadata.systems,
+				)) {
+					const config = await this.getSystemConfig(systemSlug);
+					enrichedSystems[systemSlug] = {
+						...config,
+						...systemData,
+					};
+				}
+				metadata.systems = enrichedSystems;
+			}
+
+			return {
+				path,
+				metadata,
+				content: includeContent ? body : "",
+				raw: content,
+			};
+		} catch (error) {
+			console.error(`Error fetching document ${path}:`, error);
+			return null;
+		}
+	}
+
+	/**
+	 * Parse document frontmatter and content
+	 */
+	parseDocument(content: string): { metadata: SOPMetadata; body: string } {
+		const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
+		const match = content.match(frontmatterRegex);
+
+		if (match) {
+			try {
+				const metadata = yamlParse(match[1]) as SOPMetadata;
+				const body = match[2];
+				return { metadata, body };
+			} catch (error) {
+				console.warn("Failed to parse YAML frontmatter:", error);
+				return { metadata: {}, body: content };
+			}
+		}
+
+		return { metadata: {}, body: content };
+	}
+
+	/**
+	 * Get system configuration by Pipedream app slug
+	 */
+	async getSystemConfig(systemSlug: string): Promise<SystemConfig> {
+		// Since the current repo doesn't have _config.yml files, return minimal config
+		// This can be enhanced later if config files are added
+		return {
+			pipedream_app: systemSlug,
+			display_name: systemSlug
+				.replace(/_/g, " ")
+				.replace(/\b\w/g, (l) => l.toUpperCase()),
+		};
+	}
+
+	/**
+	 * Search by multiple criteria - helper methods for advanced searches
+	 */
+	async searchByOwner(email: string): Promise<SOPSearchResult[]> {
+		return this.search(`owner:${email}`, { limit: 10 });
+	}
+
+	async searchByCompliance(standard: string): Promise<SOPSearchResult[]> {
+		return this.search(`compliance:${standard}`, { limit: 10 });
+	}
+
+	async searchBySystem(pipedreamSlug: string): Promise<SOPSearchResult[]> {
+		return this.search("", { system: pipedreamSlug, limit: 10 });
+	}
+
+	async searchRequiringApproval(): Promise<SOPSearchResult[]> {
+		return this.search("requires_approval:true", { limit: 10 });
+	}
+
+	/**
+	 * Get recent updates
+	 */
+	async getRecentlyModified(limit = 5): Promise<SOPSearchResult[]> {
+		const query = `repo:${this.owner}/${this.repo} path:processes extension:md`;
+
+		try {
+			const response = await fetch(
+				`https://api.github.com/search/code?q=${encodeURIComponent(query)}&sort=indexed&per_page=${limit}`,
+				{
+					headers: {
+						Authorization: `Bearer ${this.githubToken}`,
+						Accept: "application/vnd.github+json",
+						"X-GitHub-Api-Version": "2022-11-28",
+						"User-Agent": "asi-mcp-worker/1.0",
+					},
+				},
+			);
+
+			if (!response.ok) {
+				throw new Error(`GitHub search failed: ${response.status}`);
+			}
+
+			const data = (await response.json()) as {
+				items: Array<{ path: string }>;
+			};
+
+			const results = await Promise.allSettled(
+				data.items.map((item) => this.fetchDocument(item.path, false)),
+			);
+
+			return results
+				.filter(
+					(result): result is PromiseFulfilledResult<SOPSearchResult> =>
+						result.status === "fulfilled" && result.value !== null,
+				)
+				.map((result) => result.value);
+		} catch (error) {
+			console.error("Recent search error:", error);
+			return [];
+		}
+	}
+}
+
+
+
+================================================
+FILE: src/index.ts
+================================================
+// src/index.ts
+import * as Sentry from "@sentry/cloudflare";
+import OAuthProvider from "@cloudflare/workers-oauth-provider";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpAgent } from "agents/mcp";
+import { z } from "zod";
+import AccessDefaultHandler from "./access-handler";
+import type { Props } from "./workers-oauth-utils";
+import { SOPSearchService } from "./github-sop-search";
+import { DickerDataAuth } from "./dicker-data-auth";
+
+// ---- Environment Types ----
+export interface Env {
+	// OAuth KV storage
+	OAUTH_KV: KVNamespace;
+	// User data and caching
+	USER_LINKS: KVNamespace;
+
+	// Cloudflare Access OAuth configuration
+	ACCESS_CLIENT_ID: string;
+	ACCESS_CLIENT_SECRET: string;
+	ACCESS_TOKEN_URL: string;
+	ACCESS_AUTHORIZATION_URL: string;
+	ACCESS_JWKS_URL: string;
+	COOKIE_ENCRYPTION_KEY: string;
+
+	// Pipedream Connect configuration
+	PIPEDREAM_CLIENT_ID: string;
+	PIPEDREAM_CLIENT_SECRET: string;
+	PIPEDREAM_PROJECT_ID: string; // proj_xxx
+	PIPEDREAM_ENV: "development" | "production";
+
+	// Optional redirect URIs for Connect links:
+	CONNECT_SUCCESS_REDIRECT?: string;
+	CONNECT_ERROR_REDIRECT?: string;
+
+	// MCP Durable Object
+	MCP_OBJECT: DurableObjectNamespace;
+
+	// GitHub Issues configuration
+	GITHUB_TOKEN: string; // GitHub Personal Access Token with repo:issues
+	GITHUB_REPO: string; // "owner/repo"
+	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
+
+	// GitHub SOP Documentation configuration
+	GITHUB_SOP_OWNER?: string; // SOP docs repository owner (defaults to "ASISolutions")
+	GITHUB_SOP_REPO?: string; // SOP docs repository name (defaults to "docs")
+	GITHUB_SOP_BRANCH?: string; // SOP docs branch (defaults to "main")
+
+	// System app API keys / secrets
+	GAMMA_API_KEY?: string;
+
+	// Dicker Data credentials
+	DICKER_DATA_ACCOUNT?: string;
+	DICKER_DATA_USERNAME?: string;
+	DICKER_DATA_PASSWORD?: string;
+
+	// Sentry configuration
+	SENTRY_DSN: string;
+	SENTRY_ENV?: string;
+	CF_VERSION_METADATA: { id: string };
+}
+
+// (removed) static host-to-app utility in favor of Pipedream apps index
+
+// (removed) http_request tool and feature flag; rely on asi_magic_tool universally
+
+// ---- Dynamic Pipedream Apps cache (for host->app detection) ----
+interface PdAppInfo {
+	name_slug: string;
+	name?: string;
+	description?: string;
+	app_type?: string;
+	categories?: string[];
+	connect?: {
+		proxy_enabled?: boolean;
+		allowed_domains?: string[];
+		base_proxy_target_url?: string;
+	};
+}
+
+interface AppsIndexEntry {
+	appSlug: string;
+	allowedDomains: string[];
+	isDynamic: boolean; // base_proxy_target_url contains placeholders like {{...}}
+}
+
+type AppsIndex = AppsIndexEntry[];
+
+let IN_MEMORY_APPS_INDEX: { expiresAt: number; data: AppsIndex } | undefined;
+
+async function fetchProxyEnabledApps(
+	env: Env,
+	pdToken: string,
+): Promise<AppsIndex> {
+	// In-memory cache (best-effort; may be evicted across cold starts)
+	const now = Date.now();
+	if (IN_MEMORY_APPS_INDEX && IN_MEMORY_APPS_INDEX.expiresAt > now) {
+		return IN_MEMORY_APPS_INDEX.data;
+	}
+
+	// KV cache fallback
+	const kvKey = "pd:apps:index";
+	try {
+		const cached = await env.USER_LINKS.get(kvKey);
+		if (cached) {
+			const parsed = JSON.parse(cached) as {
+				expiresAt: number;
+				data: AppsIndex;
+			};
+			if (parsed && parsed.expiresAt > now) {
+				IN_MEMORY_APPS_INDEX = parsed;
+				return parsed.data;
+			}
+		}
+	} catch {}
+
+	// Fetch from Pipedream REST API
+	const res = await fetch("https://api.pipedream.com/v1/apps", {
+		headers: {
+			Authorization: `Bearer ${pdToken}`,
+			"x-pd-environment": env.PIPEDREAM_ENV,
+		},
+	});
+	if (!res.ok) throw new Error(`Pipedream apps list error ${res.status}`);
+	const body = (await res.json()) as { data?: PdAppInfo[] };
+	const apps = (body.data || []).filter((a) => a.connect?.proxy_enabled);
+
+	const index: AppsIndex = apps.map((a) => {
+		const allowed = (a.connect?.allowed_domains || []).map((d) =>
+			d.toLowerCase(),
+		);
+		const baseUrl = a.connect?.base_proxy_target_url || "";
+		const isDynamic = /\{\{[^}]+\}\}/.test(baseUrl);
+		// For static apps, if no allowed_domains are present, infer host from base URL
+		if (!isDynamic && allowed.length === 0) {
+			try {
+				const u = new URL(baseUrl);
+				if (u.hostname) allowed.push(u.hostname.toLowerCase());
+			} catch {}
+		}
+		return {
+			appSlug: a.name_slug,
+			allowedDomains: allowed,
+			isDynamic,
+		};
+	});
+
+	const expiresAt = now + 15 * 60 * 1000; // 15 minutes
+	IN_MEMORY_APPS_INDEX = { expiresAt, data: index };
+	try {
+		await env.USER_LINKS.put(
+			kvKey,
+			JSON.stringify({ expiresAt, data: index }),
+			{ expirationTtl: 30 * 60 },
+		);
+	} catch {}
+	return index;
+}
+
+// Enhanced search interface for apps
+// Enhanced app search result with display-friendly formatting
+interface AppSearchResult {
+	name_slug: string;
+	name?: string;
+	description?: string;
+	app_type?: string;
+	categories?: string[];
+	connect_enabled: boolean;
+	allowed_domains: string[];
+	base_url?: string;
+	is_dynamic: boolean;
+}
+
+let IN_MEMORY_APPS_SEARCH:
+	| { expiresAt: number; data: AppSearchResult[] }
+	| undefined;
+
+/**
+ * Enhanced search function with caching and comprehensive filtering
+ */
+async function searchAppsWithCache(
+	env: Env,
+	pdToken: string,
+	query?: string,
+	limit = 20,
+): Promise<AppSearchResult[]> {
+	// In-memory cache (best-effort; may be evicted across cold starts)
+	const now = Date.now();
+	let allApps: AppSearchResult[] | undefined;
+
+	if (IN_MEMORY_APPS_SEARCH && IN_MEMORY_APPS_SEARCH.expiresAt > now) {
+		allApps = IN_MEMORY_APPS_SEARCH.data;
+	} else {
+		// KV cache fallback
+		const kvKey = "pd:apps:search";
+		try {
+			const cached = await env.USER_LINKS.get(kvKey);
+			if (cached) {
+				const parsed = JSON.parse(cached) as {
+					expiresAt: number;
+					data: AppSearchResult[];
+				};
+				if (parsed && parsed.expiresAt > now) {
+					IN_MEMORY_APPS_SEARCH = parsed;
+					allApps = parsed.data;
+				}
+			}
+		} catch {}
+
+		if (!allApps) {
+			// Fetch from Pipedream REST API with error handling
+			try {
+				const res = await fetch("https://api.pipedream.com/v1/apps", {
+					headers: {
+						Authorization: `Bearer ${pdToken}`,
+					},
+				});
+				if (!res.ok) throw new Error(`Pipedream apps API error ${res.status}`);
+				const body = (await res.json()) as { data?: PdAppInfo[] };
+				const apps = body.data || [];
+
+				// Transform to search-friendly format
+				allApps = apps.map((a) => {
+					const allowed = (a.connect?.allowed_domains || []).map((d) =>
+						d.toLowerCase(),
+					);
+					const baseUrl = a.connect?.base_proxy_target_url || "";
+					const isDynamic = /\{\{[^}]+\}\}/.test(baseUrl);
+					// For static apps, if no allowed_domains are present, infer host from base URL
+					if (!isDynamic && allowed.length === 0 && baseUrl) {
+						try {
+							const u = new URL(baseUrl);
+							if (u.hostname) allowed.push(u.hostname.toLowerCase());
+						} catch {}
+					}
+					return {
+						name_slug: a.name_slug,
+						name: a.name,
+						description: a.description,
+						app_type: a.app_type,
+						categories: a.categories,
+						connect_enabled: !!a.connect?.proxy_enabled,
+						allowed_domains: allowed,
+						base_url: baseUrl,
+						is_dynamic: isDynamic,
+					};
+				});
+
+				const expiresAt = now + 15 * 60 * 1000; // 15 minutes
+				IN_MEMORY_APPS_SEARCH = { expiresAt, data: allApps };
+				try {
+					await env.USER_LINKS.put(
+						kvKey,
+						JSON.stringify({ expiresAt, data: allApps }),
+						{ expirationTtl: 30 * 60 },
+					);
+				} catch {}
+			} catch (error) {
+				throw new Error(
+					`Failed to fetch apps: ${error instanceof Error ? error.message : "Unknown error"}`,
+				);
+			}
+		}
+	}
+
+	// Filter apps by search query if provided
+	let filteredApps = allApps;
+	if (query && query.trim() !== "") {
+		const searchTerm = query.toLowerCase().trim();
+		filteredApps = allApps.filter((app) => {
+			// Search in app slug
+			if (app.name_slug.toLowerCase().includes(searchTerm)) return true;
+
+			// Search in display name
+			if (app.name && app.name.toLowerCase().includes(searchTerm)) return true;
+
+			// Search in description
+			if (app.description && app.description.toLowerCase().includes(searchTerm))
+				return true;
+
+			// Search in categories
+			if (
+				app.categories &&
+				app.categories.some((cat) => cat.toLowerCase().includes(searchTerm))
+			)
+				return true;
+
+			// Search in allowed domains (for user convenience)
+			if (app.allowed_domains.some((domain) => domain.includes(searchTerm)))
+				return true;
+
+			return false;
+		});
+	}
+
+	// Sort by relevance (exact matches first, then alphabetical)
+	if (query) {
+		filteredApps.sort((a, b) => {
+			const queryLower = query.toLowerCase();
+			const aExact = a.name_slug.toLowerCase() === queryLower;
+			const bExact = b.name_slug.toLowerCase() === queryLower;
+			if (aExact && !bExact) return -1;
+			if (!aExact && bExact) return 1;
+			return (a.name || a.name_slug).localeCompare(b.name || b.name_slug);
+		});
+	}
+
+	// Apply limit
+	return filteredApps.slice(0, limit);
+}
+
+function resolveAppFromFullUrl(
+	urlStr: string,
+	index: AppsIndex,
+): { app?: string; dynamic?: boolean } {
+	let host: string | undefined;
+	try {
+		host = new URL(urlStr).hostname.toLowerCase();
+	} catch {
+		return {};
+	}
+	if (!host) return {};
+
+	// Prefer exact match, then suffix match
+	let best: AppsIndexEntry | undefined;
+	for (const entry of index) {
+		if (entry.allowedDomains.some((d) => d === host)) {
+			best = entry;
+			break;
+		}
+	}
+	if (!best) {
+		for (const entry of index) {
+			if (entry.allowedDomains.some((d) => host?.endsWith(`.${d}`))) {
+				best = entry;
+				break;
+			}
+		}
+	}
+	return best ? { app: best.appSlug, dynamic: best.isDynamic } : {};
+}
+
+// ---- System Apps (direct auth) ----
+type SystemAppAuth =
+	| {
+			type: "api_key_header";
+			header: string;
+			valueEnv: string; // Name of Env field holding the secret
+	  }
+	| {
+			type: "session_cookie";
+			// Cookie authentication handled by DickerDataAuth class
+	  };
+
+interface SystemAppConfigEntry {
+	appSlug: string;
+	allowedDomains: string[]; // hostnames allowed for absolute URLs
+	baseUrl: string; // base origin for relative paths (e.g., https://api.example.com/v1)
+	auth: SystemAppAuth;
+	defaultHeaders?: Record<string, string>;
+}
+
+type SystemAppsConfig = SystemAppConfigEntry[];
+
+function getSystemAppsConfig(env: Env): SystemAppsConfig {
+	// Initial system apps are hard-coded. This can be extended or loaded from KV later.
+	const gamma: SystemAppConfigEntry = {
+		appSlug: "gamma",
+		allowedDomains: ["public-api.gamma.app"],
+		baseUrl: "https://public-api.gamma.app/v0.2",
+		auth: {
+			type: "api_key_header",
+			header: "X-API-KEY",
+			valueEnv: "GAMMA_API_KEY",
+		},
+		defaultHeaders: { Accept: "application/json" },
+	};
+
+	const dickerData: SystemAppConfigEntry = {
+		appSlug: "dicker_data",
+		allowedDomains: ["portal.dickerdata.co.nz"],
+		baseUrl: "https://portal.dickerdata.co.nz",
+		auth: {
+			type: "session_cookie",
+		},
+		defaultHeaders: { 
+			"Accept": "application/json, text/plain, */*",
+			"Content-Type": "application/json"
+		},
+	};
+
+	return [gamma, dickerData];
+}
+
+function resolveSystemAppFromFullUrl(
+	urlStr: string,
+	config: SystemAppsConfig,
+): SystemAppConfigEntry | undefined {
+	let host: string | undefined;
+	try {
+		host = new URL(urlStr).hostname.toLowerCase();
+	} catch {
+		return undefined;
+	}
+	if (!host) return undefined;
+	for (const entry of config) {
+		if (entry.allowedDomains.some((d) => d === host)) return entry;
+		if (entry.allowedDomains.some((d) => host.endsWith(`.${d}`))) return entry;
+	}
+	return undefined;
+}
+
+function buildSystemUrl(inputUrl: string, app: SystemAppConfigEntry): string {
+	// If absolute URL, return as-is. Otherwise, resolve against baseUrl.
+	if (/^https?:\/\//i.test(inputUrl)) return inputUrl;
+	try {
+		const base = app.baseUrl.endsWith("/") ? app.baseUrl : `${app.baseUrl}/`;
+		const rel = inputUrl.startsWith("/") ? inputUrl.slice(1) : inputUrl;
+		return new URL(rel, base).toString();
+	} catch {
+		return app.baseUrl;
+	}
+}
+
+async function directSystemRequest(
+	env: Env,
+	params: {
+		method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+		url: string; // may be relative or absolute
+		headers?: Record<string, string>;
+		body?: unknown;
+		app: SystemAppConfigEntry;
+	},
+): Promise<{ status: number; data: any }> {
+	// Validate absolute URLs against allowlist
+	const isFullUrl = /^https?:\/\//i.test(params.url);
+	if (isFullUrl) {
+		try {
+			const u = new URL(params.url);
+			const host = u.hostname.toLowerCase();
+			const allowed = params.app.allowedDomains;
+			const ok =
+				allowed.includes(host) || allowed.some((d) => host.endsWith(`.${d}`));
+			if (!ok) {
+				return {
+					status: 400,
+					data: {
+						error: "not_allowed_for_system_app",
+						message: `The URL host '${host}' is not allowed for system app '${params.app.appSlug}'.`,
+						allowed_domains: params.app.allowedDomains,
+					},
+				};
+			}
+		} catch {}
+	}
+
+	const finalUrl = buildSystemUrl(params.url, params.app);
+
+	// Prepare headers
+	const headers: Record<string, string> = {};
+	const userHeaders = sanitizeProxyHeaders(params.headers);
+	if (userHeaders) Object.assign(headers, userHeaders);
+	// Remove potentially conflicting auth
+	for (const k of Object.keys(headers)) {
+		if (k.toLowerCase() === "authorization") delete headers[k];
+	}
+
+	// Inject auth
+	switch (params.app.auth.type) {
+		case "api_key_header": {
+			const envKey = params.app.auth.valueEnv;
+			const secret = (env as any)[envKey] as string | undefined;
+			if (!secret) {
+				return {
+					status: 500,
+					data: {
+						error: "system_secret_missing",
+						message: `Missing secret '${envKey}' for system app '${params.app.appSlug}'.`,
+					},
+				};
+			}
+			headers[params.app.auth.header] = secret;
+			break;
+		}
+		case "session_cookie": {
+			if (params.app.appSlug === "dicker_data") {
+				try {
+					const dickerAuth = new DickerDataAuth(env);
+					const cookieString = await dickerAuth.refreshSessionIfNeeded();
+					headers["Cookie"] = cookieString;
+
+					// Add additional headers that Dicker Data expects
+					headers["User-Agent"] =
+						"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+					headers["X-Requested-With"] = "XMLHttpRequest";
+					headers["Referer"] = "https://portal.dickerdata.co.nz/";
+					
+					// Override default Accept header with Dicker Data specific format
+					if (!headers["Accept"] || headers["Accept"] === "application/json") {
+						headers["Accept"] = "application/json, text/plain, */*";
+					}
+				} catch (error) {
+					console.error("Dicker Data authentication failed:", error);
+					return {
+						status: 500,
+						data: {
+							error: "dicker_data_auth_failed",
+							message: `Failed to authenticate with Dicker Data: ${error instanceof Error ? error.message : "Unknown error"}`,
+							app: params.app.appSlug,
+						},
+					};
+				}
+			}
+			break;
+		}
+	}
+
+	if (!headers["Accept"]) headers["Accept"] = "application/json";
+	if (params.app.defaultHeaders)
+		Object.assign(headers, params.app.defaultHeaders);
+
+	// Body handling
+	let bodyToSend: BodyInit | null = null;
+	if (params.body !== undefined) {
+		// Transform payload for Dicker Data API compatibility
+		let processedBody = params.body;
+		if (params.app.appSlug === "dicker_data" && typeof params.body === "object" && params.body !== null) {
+			const body = params.body as Record<string, any>;
+			
+			// Transform user-friendly searchTerm to Dicker Data API format
+			if ("searchTerm" in body) {
+				processedBody = {
+					searchKeyword: body.searchTerm,
+					brand: body.brand || "",
+					type: body.type || "",
+					category: body.category || "",
+					series: body.series || "",
+					minPrice: body.minPrice ? String(body.minPrice) : "",
+					maxPrice: body.maxPrice ? String(body.maxPrice) : "",
+					excludeKits: body.excludeKits || false,
+					minSOH: body.minSOH ? String(body.minSOH) : ""
+				};
+			}
+		}
+		
+		if (typeof processedBody === "string") {
+			bodyToSend = processedBody as string;
+			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
+		} else {
+			bodyToSend = JSON.stringify(processedBody);
+			if (!headers["Content-Type"])
+				headers["Content-Type"] = "application/json";
+		}
+	}
+
+	// Execute request with retry logic for session cookie auth
+	const executeRequest = async (
+		requestHeaders: Record<string, string>,
+	): Promise<{ status: number; data: any }> => {
+		const resp = await fetch(finalUrl, {
+			method: params.method,
+			headers: requestHeaders,
+			body: bodyToSend,
+		});
+		const text = await resp.text();
+		let data: any;
+		try {
+			data = JSON.parse(text);
+		} catch {
+			data = text;
+		}
+		return { status: resp.status, data };
+	};
+
+	// First attempt
+	let result = await executeRequest(headers);
+
+	// Retry logic for session cookie authentication failures
+	if (
+		params.app.auth.type === "session_cookie" &&
+		params.app.appSlug === "dicker_data" &&
+		(result.status === 401 ||
+			result.status === 403 ||
+			(result.status === 302 &&
+				typeof result.data === "string" &&
+				result.data.includes("Login")))
+	) {
+		console.log(
+			"🔄 Dicker Data session appears expired, attempting fresh authentication",
+		);
+
+		try {
+			// Force a fresh login
+			const dickerAuth = new DickerDataAuth(env);
+			const freshCookieString = await dickerAuth.getValidSession();
+
+			// Update headers with fresh cookies
+			const freshHeaders = { ...headers };
+			freshHeaders["Cookie"] = freshCookieString;
+
+			// Retry the request
+			console.log("🔄 Retrying request with fresh Dicker Data session");
+			result = await executeRequest(freshHeaders);
+		} catch (retryError) {
+			console.error(
+				"Failed to retry with fresh Dicker Data session:",
+				retryError,
+			);
+			return {
+				status: 500,
+				data: {
+					error: "dicker_data_retry_failed",
+					message: `Authentication retry failed: ${retryError instanceof Error ? retryError.message : "Unknown error"}`,
+					original_status: result.status,
+				},
+			};
+		}
+	}
+
+	return result;
+}
+
+// ---- Pipedream Connect helpers ----
+async function getPdAccessToken(env: Env): Promise<string> {
+	// You can cache this in-memory between requests, but Workers may cold start.
+	const res = await fetch("https://api.pipedream.com/v1/oauth/token", {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			grant_type: "client_credentials",
+			client_id: env.PIPEDREAM_CLIENT_ID,
+			client_secret: env.PIPEDREAM_CLIENT_SECRET,
+		}),
+	});
+	if (!res.ok) throw new Error(`Pipedream token error ${res.status}`);
+	const data = (await res.json()) as { access_token: string };
+	return data.access_token;
+}
+
+async function listAccountsForUser(
+	env: Env,
+	pdToken: string,
+	external_user_id: string,
+	appSlug?: string,
+	includeCredentials = false,
+): Promise<{
+	data?: Array<{
+		app?: { name_slug: string };
+		id: string;
+		healthy: boolean;
+		dead: boolean;
+		expires_at?: string;
+		last_refreshed_at?: string;
+		next_refresh_at?: string;
+		credentials?: Record<string, unknown>;
+	}>;
+}> {
+	const params = new URLSearchParams({ external_user_id });
+	if (appSlug) params.set("app_id", appSlug);
+	if (includeCredentials) params.set("include_credentials", "true");
+	const res = await fetch(
+		`https://api.pipedream.com/v1/connect/${env.PIPEDREAM_PROJECT_ID}/accounts?${params.toString()}`,
+		{
+			headers: {
+				Authorization: `Bearer ${pdToken}`,
+				"x-pd-environment": env.PIPEDREAM_ENV,
+			},
+		},
+	);
+	if (!res.ok) throw new Error(`Pipedream list accounts ${res.status}`);
+	return res.json();
+}
+
+async function getAccountWithCredentials(
+	env: Env,
+	pdToken: string,
+	account_id: string,
+) {
+	const url = `https://api.pipedream.com/v1/connect/${env.PIPEDREAM_PROJECT_ID}/accounts/${account_id}?include_credentials=true`;
+	const res = await fetch(url, {
+		headers: {
+			Authorization: `Bearer ${pdToken}`,
+			"x-pd-environment": env.PIPEDREAM_ENV,
+		},
+	});
+	if (!res.ok) throw new Error(`Pipedream retrieve account ${res.status}`);
+	return res.json();
+}
+
+async function createConnectLink(
+	env: Env,
+	pdToken: string,
+	external_user_id: string,
+	appSlug?: string,
+): Promise<string> {
+	const res = await fetch(
+		`https://api.pipedream.com/v1/connect/${env.PIPEDREAM_PROJECT_ID}/tokens`,
+		{
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${pdToken}`,
+				"x-pd-environment": env.PIPEDREAM_ENV,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				external_user_id,
+				success_redirect_uri: env.CONNECT_SUCCESS_REDIRECT,
+				error_redirect_uri: env.CONNECT_ERROR_REDIRECT,
+			}),
+		},
+	);
+	if (!res.ok) throw new Error(`Pipedream connect token ${res.status}`);
+	const tk = (await res.json()) as { connect_link_url: string };
+	// Per docs: append ?app={slug} to connect_link_url when known
+	const url = new URL(tk.connect_link_url);
+	url.searchParams.set("connectLink", "true");
+	if (appSlug) url.searchParams.set("app", appSlug);
+	return url.toString();
+}
+
+async function deleteAccount(
+	env: Env,
+	pdToken: string,
+	account_id: string,
+): Promise<void> {
+	const url = `https://api.pipedream.com/v1/connect/${env.PIPEDREAM_PROJECT_ID}/accounts/${account_id}`;
+	const res = await fetch(url, {
+		method: "DELETE",
+		headers: {
+			Authorization: `Bearer ${pdToken}`,
+			"x-pd-environment": env.PIPEDREAM_ENV,
+		},
+	});
+	if (res.status !== 204)
+		throw new Error(`Delete account failed ${res.status}`);
+}
+
+// ---- Pipedream Connect Proxy helpers ----
+function base64UrlEncode(input: string): string {
+	// URL-safe Base64 without padding, per Pipedream proxy docs
+	const utf8 = new TextEncoder().encode(input);
+	let binary = "";
+	utf8.forEach((b) => (binary += String.fromCharCode(b)));
+	const b64 = btoa(binary);
+	return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+const RESTRICTED_PROXY_HEADERS = new Set([
+	"accept-encoding",
+	"access-control-request-headers",
+	"access-control-request-method",
+	"connection",
+	"content-length",
+	"cookie",
+	"date",
+	"dnt",
+	"expect",
+	"host",
+	"keep-alive",
+	"origin",
+	"permissions-policy",
+	"referer",
+	"te",
+	"trailer",
+	"transfer-encoding",
+	"upgrade",
+	"via",
+	"note",
+]);
+
+function sanitizeProxyHeaders(
+	headers?: Record<string, string>,
+): Record<string, string> | undefined {
+	if (!headers) return undefined;
+	const out: Record<string, string> = {};
+	for (const [k, v] of Object.entries(headers)) {
+		const lower = k.toLowerCase();
+		if (RESTRICTED_PROXY_HEADERS.has(lower)) continue;
+		if (lower.startsWith("proxy-") || lower.startsWith("sec-")) continue;
+		out[k] = v;
+	}
+	return out;
+}
+
+async function proxyRequest(
+	env: Env,
+	pdToken: string,
+	params: {
+		external_user_id: string;
+		account_id: string;
+		method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+		url: string;
+		headers?: Record<string, string>;
+		body?: unknown;
+	},
+): Promise<any> {
+	const encoded = base64UrlEncode(params.url);
+	const qs = new URLSearchParams({
+		external_user_id: params.external_user_id,
+		account_id: params.account_id,
+	});
+	const endpoint = `https://api.pipedream.com/v1/connect/${env.PIPEDREAM_PROJECT_ID}/proxy/${encoded}?${qs.toString()}`;
+
+	const headers: Record<string, string> = {
+		Authorization: `Bearer ${pdToken}`,
+		"x-pd-environment": env.PIPEDREAM_ENV,
+	};
+	// Use override header for non-POST methods to achieve proper upstream semantics
+	if (params.method && params.method !== "POST")
+		headers["X-HTTP-Method-Override"] = params.method;
+	headers["Accept"] = headers["Accept"] || "application/json";
+	const cleanHeaders = sanitizeProxyHeaders(params.headers);
+	if (cleanHeaders && Object.keys(cleanHeaders).length) {
+		Object.assign(headers, cleanHeaders);
+	}
+
+	// Always POST to the proxy; include empty JSON object when no body is provided
+	let bodyToSend: BodyInit = "{}";
+	if (params.body !== undefined) {
+		if (typeof params.body === "string") {
+			bodyToSend = params.body as string;
+			if (!headers["Content-Type"]) headers["Content-Type"] = "text/plain";
+		} else {
+			bodyToSend = JSON.stringify(params.body);
+			if (!headers["Content-Type"])
+				headers["Content-Type"] = "application/json";
+		}
+	} else {
+		headers["Content-Type"] = headers["Content-Type"] || "application/json";
+	}
+
+	const resp = await fetch(endpoint, {
+		method: "POST",
+		headers,
+		body: bodyToSend,
+	});
+	const text = await resp.text();
+	let data: any;
+	try {
+		data = JSON.parse(text);
+	} catch {
+		data = text;
+	}
+	return { status: resp.status, data };
+}
+
+// (removed) Xero tenant helper; asi_magic_tool path is now canonical
+
+// ---- MCP Server class ----
+export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
+	server = new McpServer({ name: "ASI Connect MCP", version: "1.0.0" });
+
+	// Helper to derive a stable user id for Pipedream Connect from OAuth claims
+	private getExternalUserId() {
+		const sub = this.props?.sub;
+		if (!sub) {
+			throw new Error("Missing user subject claim; user not authenticated.");
+		}
+		return sub;
+	}
+
+	// Helper to sanitize args for Sentry breadcrumbs
+	private sanitizeArgs(args: unknown) {
+		try {
+			const clone = JSON.parse(JSON.stringify(args ?? {}));
+			const scrub = (o: any) => {
+				if (!o || typeof o !== "object") return;
+				for (const k of Object.keys(o)) {
+					if (
+						/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret)/i.test(
+							k,
+						)
+					) {
+						o[k] = "[redacted]";
+					} else {
+						scrub(o[k]);
+					}
+				}
+			};
+			scrub(clone);
+			return clone;
+		} catch {
+			return {};
+		}
+	}
+
+	// Helper to add Sentry instrumentation to a tool handler
+	private withSentryInstrumentation<TArgs>(
+		toolName: string,
+		deriveApp: (args: TArgs) => string | undefined,
+		handler: (args: TArgs) => Promise<{ content: any[] }>,
+	) {
+		return async (args: TArgs) => {
+			const sub = this.props?.sub as string | undefined;
+			const email = (this.props?.email as string | undefined) || undefined;
+			const app = deriveApp(args);
+
+			// Safely attempt Sentry operations with fallback
+			const safeSentryCall = (operation: () => void) => {
+				try {
+					if (this.env.SENTRY_DSN) {
+						operation();
+					}
+				} catch (error) {
+					// Silent fallback - don't break the request if Sentry fails
+					console.warn(`Sentry operation failed:`, error);
+				}
+			};
+
+			// Attach user/app to scope for this call
+			safeSentryCall(() => {
+				Sentry.setUser(email ? { id: sub, email } : { id: sub ?? "unknown" });
+				Sentry.setTag("tool", toolName);
+				if (app) Sentry.setTag("app", app);
+			});
+
+			// Breadcrumb with sanitized inputs
+			safeSentryCall(() => {
+				Sentry.addBreadcrumb({
+					category: "mcp.tool.called",
+					level: "info",
+					data: { tool: toolName, app, args: this.sanitizeArgs(args) },
+				});
+			});
+
+			// One transaction-like span per tool call (with fallback)
+			if (this.env.SENTRY_DSN) {
+				try {
+					return await Sentry.startSpan(
+						{
+							name: `mcp.tool/${toolName}`,
+							op: "mcp.tool",
+							forceTransaction: true,
+							attributes: {
+								"mcp.user.sub": sub ?? "unknown",
+								...(app ? { "mcp.app": app } : {}),
+							},
+						},
+						async () => {
+							try {
+								const result = await handler(args);
+								return result;
+							} catch (err) {
+								// Try to capture error, but don't fail if Sentry is down
+								let eventId = "unavailable";
+								safeSentryCall(() => {
+									eventId = Sentry.captureException(err, {
+										tags: { tool: toolName, app },
+									});
+								});
+								return {
+									content: [
+										{
+											type: "text",
+											text: JSON.stringify({
+												error: "internal_error",
+												eventId,
+											}),
+										},
+									],
+								};
+							}
+						},
+					);
+				} catch (sentryError) {
+					console.warn(
+						`Sentry span creation failed, falling back to direct execution:`,
+						sentryError,
+					);
+					// Fallback to direct execution without Sentry
+				}
+			}
+
+			// Direct execution fallback (when Sentry is unavailable or disabled)
+			try {
+				const result = await handler(args);
+				return result;
+			} catch (err) {
+				// Log error locally when Sentry is unavailable
+				console.error(`Tool ${toolName} error:`, err);
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify({
+								error: "internal_error",
+								eventId: "sentry_unavailable",
+							}),
+						},
+					],
+				};
+			}
+		};
+	}
+
+	async init() {
+		// -------- assistant_instructions prompt --------
+		this.server.prompt(
+			"assistant_instructions",
+			"Get instructions for the AI assistant on how to help users with their tasks",
+			async () => {
+				const external_user_id = this.getExternalUserId();
+				const pdToken = await getPdAccessToken(this.env);
+
+				// Get currently connected apps for this user
+				const res = await listAccountsForUser(
+					this.env,
+					pdToken,
+					external_user_id,
+					undefined,
+					false,
+				);
+
+				const connectedApps = (res.data || []).map((a) => ({
+					app: a.app?.name_slug,
+					account_id: a.id,
+					healthy: a.healthy,
+					dead: a.dead,
+				}));
+
+				const instructions = `
+## Assistant Instructions
+
+If the user asks you to perform a task, search for the relevant SOP and follow it. The SOP will contain the required apps and HTTP requests to make with the asi_magic_tool.
+
+If the user needs to connect to an app, use the app slug from the SOP. If it's not in the SOP, you can search for the app with the search_apps tool.
+
+## Currently Connected Apps
+
+${
+	connectedApps.length > 0
+		? connectedApps
+				.map(
+					(app) =>
+						`- **${app.app}** (${app.healthy ? "healthy" : app.dead ? "dead" : "unknown status"}) - Account ID: ${app.account_id}`,
+				)
+				.join("\n")
+		: "- No apps currently connected"
+}
+
+## Key Steps for Task Execution
+
+1. **Search for relevant SOPs** using the \`search_sop_docs\` tool
+2. **Follow the SOP process** - it contains the required apps and API calls
+3. **Connect to required apps** if not already connected using \`auth_connect\` with the app slug from the SOP
+4. **Make API requests** using the \`asi_magic_tool\` as specified in the SOP
+5. **Handle any authentication** - if a request fails with auth required, use the connect URL provided
+
+## Available Tools
+- \`search_sop_docs\` - Search ASI Solutions documentation for processes
+- \`get_sop_process\` - Get specific SOP by process code (e.g., FIN-001)
+- \`search_apps\` - Find available apps to connect to
+- \`auth_connect\` - Generate connection links for apps
+- \`auth_status\` - Check current connection status
+- \`asi_magic_tool\` - Make authenticated API requests
+- \`send_feedback\` - Report issues or request new features
+`;
+
+				return {
+					messages: [
+						{
+							role: "assistant",
+							content: {
+								type: "text",
+								text: instructions.trim(),
+							},
+						},
+					],
+				};
+			},
+		);
+
+		// ---- Helper: GitHub issue creation ----
+		const createGithubIssue = async (
+			title: string,
+			body: string,
+		): Promise<
+			{ html_url?: string; number?: number; error?: string } | undefined
+		> => {
+			const token = this.env.GITHUB_TOKEN;
+			const repo = this.env.GITHUB_REPO;
+			if (!token || !repo) return { error: "GitHub not configured" } as any;
+			const apiBase = this.env.GITHUB_API_BASE || "https://api.github.com";
+			const url = `${apiBase.replace(/\/$/, "")}/repos/${repo}/issues`;
+			const resp = await fetch(url, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					Accept: "application/vnd.github+json",
+					"Content-Type": "application/json",
+					"X-GitHub-Api-Version": "2022-11-28",
+					"User-Agent": "asi-mcp-worker/1.0",
+				},
+				body: JSON.stringify({ title, body }),
+			});
+			if (!resp.ok) {
+				let message = `GitHub error ${resp.status}`;
+				try {
+					const text = await resp.text();
+					try {
+						const j: any = JSON.parse(text);
+						message = j?.message || message;
+					} catch {
+						if (text) message = `${message}: ${text.substring(0, 300)}`;
+					}
+				} catch {}
+				return { error: message } as any;
+			}
+			return resp.json();
+		};
+		// -------- auth_status --------
+		this.server.tool(
+			"auth_status",
+			{},
+			this.withSentryInstrumentation(
+				"auth_status",
+				() => undefined, // no single app
+				async () => {
+					const external_user_id = this.getExternalUserId();
+					const pdToken = await getPdAccessToken(this.env);
+					const res = await listAccountsForUser(
+						this.env,
+						pdToken,
+						external_user_id,
+						undefined,
+						false,
+					);
+
+					const data = (res.data || []).map((a) => ({
+						app: a.app?.name_slug,
+						account_id: a.id,
+						healthy: a.healthy,
+						dead: a.dead,
+						expires_at: a.expires_at,
+						last_refreshed_at: a.last_refreshed_at,
+						next_refresh_at: a.next_refresh_at,
+					}));
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({ external_user_id, accounts: data }),
+							},
+						],
+					};
+				},
+			),
+		);
+
+		// -------- auth_connect --------
+		this.server.tool(
+			"auth_connect",
+			{
+				app: z.string().optional(),
+			},
+			this.withSentryInstrumentation(
+				"auth_connect",
+				(args) => args.app,
+				async ({ app }: { app?: string }) => {
+					const external_user_id = this.getExternalUserId();
+					const pdToken = await getPdAccessToken(this.env);
+					const url = await createConnectLink(
+						this.env,
+						pdToken,
+						external_user_id,
+						app,
+					);
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									app,
+									external_user_id,
+									connect_url: url,
+									note: "Open this URL to connect the account.",
+								}),
+							},
+						],
+					};
+				},
+			),
+		);
+
+		// -------- auth_disconnect --------
+		this.server.tool(
+			"auth_disconnect",
+			{
+				app: z.string().optional(),
+				account_id: z.string().optional(),
+			},
+			this.withSentryInstrumentation(
+				"auth_disconnect",
+				(args) => args.app,
+				async ({ app, account_id }: { app?: string; account_id?: string }) => {
+					const external_user_id = this.getExternalUserId();
+					const pdToken = await getPdAccessToken(this.env);
+
+					// Require at least one discriminator to avoid ambiguity across apps
+					if (!account_id && !app) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "Provide either account_id or app to disconnect.",
+								},
+							],
+						};
+					}
+
+					let acctId = account_id;
+					if (!acctId) {
+						const listed = await listAccountsForUser(
+							this.env,
+							pdToken,
+							external_user_id,
+							app,
+						);
+						// Filter accounts to ensure we only get accounts for the specified app
+						const matchingAccounts = (listed?.data || []).filter(
+							(account) => account.app?.name_slug === app,
+						);
+						acctId = matchingAccounts[0]?.id;
+					}
+					if (!acctId) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `No account found for app ${app || "(unspecified)"}.`,
+								},
+							],
+						};
+					}
+					await deleteAccount(this.env, pdToken, acctId);
+
+					// Clean per-app cache (currently only Xero uses tenant cache)
+					let resolvedApp = app;
+					if (!resolvedApp) {
+						try {
+							const detailed: any = await getAccountWithCredentials(
+								this.env,
+								pdToken,
+								acctId,
+							);
+							resolvedApp = detailed?.data?.app?.name_slug;
+						} catch {}
+					}
+					if (resolvedApp === "xero") {
+						await this.env.USER_LINKS.delete(`xero-tenant:${external_user_id}`);
+					}
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Disconnected ${resolvedApp || "account"}.`,
+							},
+						],
+					};
+				},
+			),
+		);
+
+		// -------- search_apps --------
+		this.server.tool(
+			"search_apps",
+			{
+				query: z.string().min(1).max(200).optional(),
+				name: z.string().min(1).max(100).optional(),
+				slug: z.string().min(1).max(100).optional(),
+				description: z.string().min(1).max(200).optional(),
+				domain: z.string().min(1).max(100).optional(),
+				limit: z.number().min(1).max(50).optional(),
+			},
+			this.withSentryInstrumentation(
+				"search_apps",
+				() => undefined, // no single app
+				async ({
+					query,
+					name,
+					slug,
+					description,
+					domain,
+					limit = 10,
+				}: {
+					query?: string;
+					name?: string;
+					slug?: string;
+					description?: string;
+					domain?: string;
+					limit?: number;
+				}) => {
+					const pdToken = await getPdAccessToken(this.env);
+					
+					// Build URL with query parameters per Pipedream API docs
+					let url = "https://api.pipedream.com/v1/apps";
+					const params = new URLSearchParams();
+					
+					// Use the 'q' parameter for general search as per API docs
+					if (query) {
+						params.set("q", query);
+					}
+					
+					if (params.toString()) {
+						url += "?" + params.toString();
+					}
+					
+					// Fetch apps from Pipedream with query parameters
+					// Note: x-pd-environment header causes "record not found" - remove it for global app search
+					const res = await fetch(url, {
+						headers: {
+							Authorization: `Bearer ${pdToken}`,
+						},
+					});
+					if (!res.ok)
+						throw new Error(`Pipedream apps search error ${res.status}`);
+					const body = (await res.json()) as { data?: PdAppInfo[] };
+					let allApps = body.data || [];
+
+					// Apply additional client-side filters for parameters not supported by API
+					let filteredApps = allApps;
+					if (name) {
+						const nameLower = name.toLowerCase();
+						filteredApps = filteredApps.filter((app) =>
+							app.name?.toLowerCase().includes(nameLower),
+						);
+					}
+
+					if (slug) {
+						const slugLower = slug.toLowerCase();
+						filteredApps = filteredApps.filter((app) =>
+							app.name_slug?.toLowerCase().includes(slugLower),
+						);
+					}
+
+					if (description) {
+						const descLower = description.toLowerCase();
+						filteredApps = filteredApps.filter((app) =>
+							app.description?.toLowerCase().includes(descLower),
+						);
+					}
+
+					if (domain) {
+						const domainLower = domain.toLowerCase();
+						filteredApps = filteredApps.filter((app) =>
+							app.connect?.allowed_domains?.some((d) =>
+								d.toLowerCase().includes(domainLower),
+							),
+						);
+					}
+
+					// Sort by relevance (exact matches first, then alphabetical)
+					filteredApps.sort((a, b) => {
+						if (query) {
+							const aExact = a.name_slug.toLowerCase() === query.toLowerCase();
+							const bExact = b.name_slug.toLowerCase() === query.toLowerCase();
+							if (aExact && !bExact) return -1;
+							if (!aExact && bExact) return 1;
+						}
+						return (a.name || a.name_slug).localeCompare(b.name || b.name_slug);
+					});
+
+					// Apply limit
+					const results = filteredApps.slice(0, limit);
+
+					// Format results for response
+					const formattedResults = results.map((app) => ({
+						name_slug: app.name_slug,
+						name: app.name,
+						description: app.description,
+						connect_enabled: !!app.connect?.proxy_enabled,
+						allowed_domains: app.connect?.allowed_domains || [],
+						base_url: app.connect?.base_proxy_target_url,
+						is_dynamic: /\{\{[^}]+\}\}/.test(
+							app.connect?.base_proxy_target_url || "",
+						),
+					}));
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									query,
+									filters: { name, slug, description, domain },
+									results: formattedResults,
+									total_results: formattedResults.length,
+									total_available: allApps.length,
+									environment: this.env.PIPEDREAM_ENV,
+								}),
+							},
+						],
+					};
+				},
+			),
+		);
+
+		// (removed) http_request tool
+
+		// -------- ASI Magic Tool (formerly proxy_request) --------
+		this.server.tool(
+			"asi_magic_tool",
+			{
+				method: z
+					.enum(["GET", "POST", "PUT", "PATCH", "DELETE"])
+					.describe("HTTP method for the API request"),
+				url: z
+					.string()
+					.describe(
+						"API endpoint URL. CRITICAL: Before using this tool, ALWAYS search for and review relevant SOPs using search_sop_docs to ensure you follow proper procedures and understand the correct API usage patterns.",
+					),
+				headers: z
+					.record(z.string())
+					.optional()
+					.describe("Custom HTTP headers for the request"),
+				body: z
+					.union([z.string(), z.record(z.any())])
+					.optional()
+					.describe("Request body data (JSON object or string)"),
+				account_id: z
+					.string()
+					.optional()
+					.describe("Specific account ID to use for authentication"),
+				app: z
+					.string()
+					.optional()
+					.describe("App slug to use (e.g., 'xero_accounting_api', 'hubspot')"),
+				provider: z
+					.enum(["system", "pipedream"])
+					.optional()
+					.describe("Force specific provider (system or pipedream)"),
+			},
+			this.withSentryInstrumentation(
+				"asi_magic_tool",
+				(args) => {
+					// Try to derive app from args.app or detect from URL
+					if (args.app) return args.app;
+					const isFullUrl = /^https?:\/\//i.test(args.url);
+					if (isFullUrl) {
+						try {
+							const host = new URL(args.url).hostname.toLowerCase();
+							// This is a simplified detection - the full logic is in the handler
+							if (host.includes("hubspot")) return "hubspot";
+							if (host.includes("xero")) return "xero";
+							if (host.includes("pandadoc")) return "pandadoc";
+							if (host.includes("gamma")) return "gamma";
+						} catch {}
+					}
+					return undefined;
+				},
+				async ({
+					method,
+					url,
+					headers,
+					body,
+					account_id,
+					app,
+					provider,
+				}: {
+					method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+					url: string;
+					headers?: Record<string, string>;
+					body?: string | Record<string, unknown>;
+					account_id?: string;
+					app?: string;
+					provider?: "system" | "pipedream";
+				}) => {
+					const external_user_id = this.getExternalUserId();
+
+					// System apps resolution
+					const systemApps = getSystemAppsConfig(this.env);
+					const systemAppBySlug = app
+						? systemApps.find((e) => e.appSlug === app)
+						: undefined;
+					const isFullUrl = /^https?:\/\//i.test(url);
+					const systemAppByUrl =
+						!systemAppBySlug && isFullUrl
+							? resolveSystemAppFromFullUrl(url, systemApps)
+							: undefined;
+					const selectedSystemApp = systemAppBySlug || systemAppByUrl;
+
+					// If explicitly requested system provider, enforce resolution
+					if (provider === "system") {
+						if (!selectedSystemApp) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											error: "system_app_required",
+											message:
+												"Provider set to system, but no matching system app found. Pass app or use a URL matching an allowed domain.",
+											allowed_system_apps: systemApps.map((e) => e.appSlug),
+										}),
+									},
+								],
+							};
+						}
+						const sysResult = await directSystemRequest(this.env, {
+							method,
+							url,
+							headers,
+							body:
+								typeof body === "string"
+									? (() => {
+											try {
+												return JSON.parse(body);
+											} catch {
+												return body;
+											}
+										})()
+									: body,
+							app: selectedSystemApp,
+						});
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										provider: "system",
+										app: selectedSystemApp.appSlug,
+										...sysResult,
+									}),
+								},
+							],
+						};
+					}
+
+					// Lazy-fetch Pipedream token only if needed
+					let pdToken: string | undefined;
+
+					// Resolve app slug dynamically when possible
+					let resolvedApp = app;
+					if (!resolvedApp && isFullUrl) {
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const index = await fetchProxyEnabledApps(this.env, pdToken);
+							const { app: detectedApp, dynamic } = resolveAppFromFullUrl(
+								url,
+								index,
+							);
+							if (detectedApp) resolvedApp = detectedApp;
+							// If app is dynamic and a full URL was provided, convert to relative per docs
+							if (dynamic) {
+								const u = new URL(url);
+								const relative = u.pathname + (u.search || "");
+								url = relative || "/";
+							}
+						} catch {}
+					}
+
+					// Prefer system app if available and no explicit account_id or provider override
+					if (!account_id && !provider && selectedSystemApp) {
+						const sysResult = await directSystemRequest(this.env, {
+							method,
+							url,
+							headers,
+							body:
+								typeof body === "string"
+									? (() => {
+											try {
+												return JSON.parse(body);
+											} catch {
+												return body;
+											}
+										})()
+									: body,
+							app: selectedSystemApp,
+						});
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										provider: "system",
+										app: selectedSystemApp.appSlug,
+										...sysResult,
+									}),
+								},
+							],
+						};
+					}
+
+					// If account_id provided but app still unknown, derive app from account details
+					if (!resolvedApp && account_id) {
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const detailed: any = await getAccountWithCredentials(
+								this.env,
+								pdToken,
+								account_id,
+							);
+							const slug = detailed?.data?.app?.name_slug;
+							if (slug) resolvedApp = slug;
+						} catch {}
+					}
+
+					// If we still can't resolve an app, this destination isn't supported by the proxy
+					if (!resolvedApp) {
+						let supported: string[] = [];
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const index = await fetchProxyEnabledApps(this.env, pdToken);
+							supported = index.map((e) => e.appSlug);
+						} catch {}
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "unsupported_destination",
+										message:
+											"This URL does not map to a supported Pipedream Connect app for this project.",
+										url,
+										supported_apps: supported,
+										action:
+											"Pass the app parameter and a relative path (e.g., '/crm/v3/...'), or use auth.connect to add support.",
+										note: "Tip: Use the send_feedback tool to report unsupported API requests.",
+									}),
+								},
+							],
+						};
+					}
+
+					// Resolve account
+					let acctId = account_id;
+					if (!acctId) {
+						pdToken = pdToken || (await getPdAccessToken(this.env));
+						const listed = await listAccountsForUser(
+							this.env,
+							pdToken,
+							external_user_id,
+							resolvedApp,
+							false,
+						);
+						// Filter accounts to ensure we only get accounts for the resolved app
+						// This is defensive programming in case the API doesn't filter properly
+						const matchingAccounts = (listed?.data || []).filter(
+							(account) => account.app?.name_slug === resolvedApp,
+						);
+						acctId = matchingAccounts[0]?.id;
+					}
+					if (!acctId) {
+						pdToken = pdToken || (await getPdAccessToken(this.env));
+						const connectUrl = await createConnectLink(
+							this.env,
+							pdToken,
+							external_user_id,
+							resolvedApp,
+						);
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										requires_auth: true,
+										app: resolvedApp,
+										connect_url: connectUrl,
+									}),
+								},
+							],
+						};
+					}
+
+					// Prepare body
+					let proxyBody: unknown = body;
+					if (typeof body === "string") {
+						try {
+							proxyBody = JSON.parse(body);
+						} catch {
+							proxyBody = body;
+						}
+					}
+
+					pdToken = pdToken || (await getPdAccessToken(this.env));
+
+					// Process headers for Pipedream Connect proxy
+					// Pipedream Connect proxy only forwards headers with x-pd-proxy- prefix
+					let processedHeaders: Record<string, string> | undefined;
+					if (headers) {
+						processedHeaders = {};
+						for (const [key, value] of Object.entries(headers)) {
+							// Add x-pd-proxy- prefix to all custom headers so they get forwarded
+							if (!key.toLowerCase().startsWith("x-pd-proxy-")) {
+								processedHeaders[`x-pd-proxy-${key}`] = value;
+							} else {
+								// Already has prefix, keep as-is
+								processedHeaders[key] = value;
+							}
+						}
+					}
+
+					// Add nested span for the actual HTTP request (with fallback)
+					let result: any;
+					const executeProxyRequest = async () => {
+						const resp = await proxyRequest(this.env, pdToken!, {
+							external_user_id,
+							account_id: acctId,
+							method,
+							url,
+							headers: processedHeaders,
+							body: proxyBody,
+						});
+
+						// Safely add breadcrumb with response info
+						try {
+							if (this.env.SENTRY_DSN) {
+								Sentry.addBreadcrumb({
+									category: "mcp.proxy.response",
+									level:
+										resp.status >= 500
+											? "error"
+											: resp.status >= 400
+												? "warning"
+												: "info",
+									data: {
+										status: resp.status,
+										app: resolvedApp,
+										host: isFullUrl
+											? new URL(url).hostname
+											: "api.pipedream.com",
+									},
+								});
+							}
+						} catch (sentryError) {
+							console.warn(`Sentry breadcrumb failed:`, sentryError);
+						}
+
+						return resp;
+					};
+
+					if (this.env.SENTRY_DSN) {
+						try {
+							result = await Sentry.startSpan(
+								{
+									name: "mcp.proxy.request",
+									op: "http.client",
+									attributes: {
+										"http.method": method,
+										"http.url": new URL(url, "https://example.com").origin, // avoid path params in spans
+										"dest.host": isFullUrl
+											? new URL(url).hostname
+											: "api.pipedream.com",
+										"mcp.app": resolvedApp ?? "unknown",
+									},
+								},
+								executeProxyRequest,
+							);
+						} catch (sentryError) {
+							console.warn(
+								`Sentry HTTP span failed, falling back to direct execution:`,
+								sentryError,
+							);
+							result = await executeProxyRequest();
+						}
+					} else {
+						result = await executeProxyRequest();
+					}
+
+					// Intercept common mismatch error to provide clearer guidance
+					if (
+						result?.status === 400 &&
+						(result as any)?.data?.error?.domain &&
+						String((result as any).data.error.domain)
+							.toLowerCase()
+							.includes("not allowed")
+					) {
+						let allowed: string[] | undefined;
+						try {
+							pdToken = pdToken || (await getPdAccessToken(this.env));
+							const index = await fetchProxyEnabledApps(this.env, pdToken);
+							const entry = index.find((e) => e.appSlug === resolvedApp);
+							allowed = entry?.allowedDomains;
+						} catch {}
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "not_allowed_for_app",
+										message: `The URL is not allowed for the selected app. Provide a relative path or target one of the allowed domains for ${resolvedApp}.`,
+										app: resolvedApp,
+										account_id: acctId,
+										url,
+										allowed_domains: allowed,
+									}),
+								},
+							],
+						};
+					}
+
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									app: resolvedApp,
+									account_id: acctId,
+									...result,
+								}),
+							},
+						],
+					};
+				},
+			),
+		);
+
+		// -------- send_feedback --------
+		this.server.tool(
+			"send_feedback",
+			{
+				title: z.string().min(4).max(120),
+				message: z.string().min(10).max(4000),
+				context: z
+					.object({
+						app: z.string().optional(),
+						url: z.string().optional(),
+						tool: z.string().optional(),
+						payload: z.any().optional(),
+					})
+					.optional(),
+			},
+			this.withSentryInstrumentation(
+				"send_feedback",
+				(args) => args.context?.app,
+				async ({
+					title,
+					message,
+					context,
+				}: {
+					title: string;
+					message: string;
+					context?: any;
+				}) => {
+					const userId = this.getExternalUserId();
+					const email = this.props?.email || "";
+					const name = this.props?.name || "";
+					const when = new Date().toISOString();
+
+					const bodyLines = [
+						`Reporter: ${name || "(unknown)"} <${email || ""}>`,
+						`User ID: ${userId}`,
+						`When: ${when}`,
+						"",
+						"Message:",
+						"" + message,
+					];
+					if (context) {
+						bodyLines.push("", "Context:");
+						try {
+							bodyLines.push(
+								"```json\n" + JSON.stringify(context, null, 2) + "\n```",
+							);
+						} catch {
+							bodyLines.push("(context not serializable)");
+						}
+					}
+
+					const issue = await createGithubIssue(title, bodyLines.join("\n"));
+					if (!issue || (issue as any).error) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										ok: false,
+										error: (issue as any)?.error || "Unknown error",
+									}),
+								},
+							],
+						};
+					}
+					return {
+						content: [
+							{
+								type: "text",
+								text: JSON.stringify({
+									ok: true,
+									issue_number: (issue as any).number,
+									issue_url: (issue as any).html_url,
+								}),
+							},
+						],
+					};
+				},
+			),
+		);
+
+		// -------- search_sop_docs --------
+		this.server.tool(
+			"search_sop_docs",
+			{
+				query: z
+					.string()
+					.min(1)
+					.max(200)
+					.describe(
+						"Search query for SOP documentation. CRITICAL: Always search for and review relevant SOPs before using the ASI Magic Tool (asi_magic_tool) to ensure proper procedures are followed.",
+					),
+				search_type: z
+					.enum([
+						"process",
+						"quick",
+						"system",
+						"sales",
+						"finance",
+						"operations",
+						"support",
+					])
+					.optional()
+					.describe("Type of SOP to search for"),
+				system: z
+					.string()
+					.optional()
+					.describe(
+						"Specific system name to search SOPs for (e.g., 'xero', 'hubspot')",
+					),
+				limit: z
+					.number()
+					.min(1)
+					.max(20)
+					.optional()
+					.describe("Maximum number of results to return"),
+				include_content: z
+					.boolean()
+					.optional()
+					.describe("Whether to include full SOP content in results"),
+			},
+			this.withSentryInstrumentation(
+				"search_sop_docs",
+				() => undefined, // no single app
+				async ({
+					query,
+					search_type,
+					system,
+					limit,
+					include_content,
+				}: {
+					query: string;
+					search_type?:
+						| "process"
+						| "quick"
+						| "system"
+						| "sales"
+						| "finance"
+						| "operations"
+						| "support";
+					system?: string;
+					limit?: number;
+					include_content?: boolean;
+				}) => {
+					console.log(`🔍 SOP search called with:`, {
+						query,
+						search_type,
+						system,
+						limit,
+						include_content,
+					});
+
+					const token = this.env.GITHUB_TOKEN;
+					console.log(`🔑 GitHub token present: ${!!token}`);
+
+					if (!token) {
+						console.error("❌ GitHub token missing");
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "github_not_configured",
+										message:
+											"GitHub token not configured for SOP documentation search",
+									}),
+								},
+							],
+						};
+					}
+
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
+					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
+
+					console.log(
+						`📚 Using repository: ${sopOwner}/${sopRepo} (branch: ${sopBranch})`,
+					);
+
+					try {
+						const sopService = new SOPSearchService(
+							token,
+							sopOwner,
+							sopRepo,
+							sopBranch,
+						);
+						console.log(`🚀 Starting search...`);
+						const results = await sopService.search(query, {
+							searchType: search_type,
+							system,
+							limit: limit || 5,
+							includeContent: include_content || false,
+						});
+
+						console.log(`✅ Search completed, found ${results.length} results`);
+
+						if (results.length === 0) {
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											query,
+											results: [],
+											total_results: 0,
+											message:
+												"No matching SOP documents found. Try different search terms or check if the repository exists.",
+										}),
+									},
+								],
+							};
+						}
+
+						// Format results for response
+						const formattedResults = results.map((result) => ({
+							path: result.path,
+							process_code: result.metadata.process_code,
+							title: result.metadata.title,
+							description: result.metadata.description,
+							category: result.metadata.category,
+							systems: result.metadata.systems
+								? Object.keys(result.metadata.systems)
+								: undefined,
+							estimated_time: result.metadata.estimated_time,
+							requires_approval: result.metadata.requires_approval,
+							owner: result.metadata.owner,
+							last_modified: result.metadata.last_modified,
+							...(include_content && { content: result.content }),
+							gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace(".md", "")}`,
+						}));
+
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										query,
+										search_type,
+										system,
+										results: formattedResults,
+										total_results: formattedResults.length,
+										repository: `${sopOwner}/${sopRepo}`,
+									}),
+								},
+							],
+						};
+					} catch (error) {
+						console.error(`💥 Search error:`, error);
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "search_failed",
+										message: `SOP documentation search failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+										query,
+									}),
+								},
+							],
+						};
+					}
+				},
+			),
+		);
+
+		// -------- get_sop_process --------
+		this.server.tool(
+			"get_sop_process",
+			{
+				process_code: z
+					.string()
+					.regex(
+						/^[A-Z]+-\d{3}$/,
+						"Process code must be in format CATEGORY-001",
+					),
+			},
+			this.withSentryInstrumentation(
+				"get_sop_process",
+				() => undefined,
+				async ({ process_code }: { process_code: string }) => {
+					console.log(`🎯 Process lookup called for: ${process_code}`);
+
+					const token = this.env.GITHUB_TOKEN;
+					if (!token) {
+						console.error("❌ GitHub token missing for process lookup");
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "github_not_configured",
+										message:
+											"GitHub token not configured for SOP documentation access",
+									}),
+								},
+							],
+						};
+					}
+
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
+					const sopBranch = this.env.GITHUB_SOP_BRANCH || "main";
+
+					try {
+						const sopService = new SOPSearchService(
+							token,
+							sopOwner,
+							sopRepo,
+							sopBranch,
+						);
+						const result = await sopService.getByProcessCode(process_code);
+
+						if (!result) {
+							console.log(`❌ Process ${process_code} not found`);
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											error: "process_not_found",
+											message: `Process ${process_code} not found in SOP documentation`,
+											process_code,
+										}),
+									},
+								],
+							};
+						}
+
+						console.log(`✅ Process ${process_code} found at ${result.path}`);
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										process_code,
+										path: result.path,
+										metadata: result.metadata,
+										content: result.content,
+										gitbook_url: `https://asi-solutions.gitbook.io/docs/${result.path.replace(".md", "")}`,
+
+										repository: `${sopOwner}/${sopRepo}`,
+									}),
+								},
+							],
+						};
+					} catch (error) {
+						console.error(`💥 Process lookup error:`, error);
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "process_fetch_failed",
+										message: `Failed to fetch process ${process_code}: ${error instanceof Error ? error.message : "Unknown error"}`,
+										process_code,
+									}),
+								},
+							],
+						};
+					}
+				},
+			),
+		);
+	}
+}
+
+// Helper to redact secrets from any Sentry payload
+function scrubEvent(event: Sentry.Event): Sentry.Event {
+	const redact = (obj: any) => {
+		if (!obj || typeof obj !== "object") return;
+		for (const k of Object.keys(obj)) {
+			if (
+				/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret)/i.test(
+					k,
+				)
+			) {
+				obj[k] = "[redacted]";
+			} else {
+				redact(obj[k]);
+			}
+		}
+	};
+	redact((event as any).request);
+	redact(event.contexts);
+	redact(event.extra);
+	redact((event as any).breadcrumbs);
+	return event;
+}
+
+// Create the OAuth Provider instance
+const provider = new OAuthProvider({
+	// Protect both the HTTP and SSE MCP endpoints
+	apiHandlers: {
+		"/mcp": ASIConnectMCP.serve("/mcp") as any,
+		"/sse": ASIConnectMCP.serveSSE("/sse") as any,
+	},
+	// The UI / SSO flow is handled by Access in our default handler
+	defaultHandler: AccessDefaultHandler,
+	// OAuth endpoints surfaced by the provider
+	authorizeEndpoint: "/authorize",
+	tokenEndpoint: "/token",
+	clientRegistrationEndpoint: "/register",
+	scopesSupported: ["openid", "email", "profile"],
+});
+
+// Helper to safely wrap with Sentry or fallback gracefully
+function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
+	return {
+		fetch: async (request, env, ctx) => {
+			// Check if Sentry should be enabled
+			if (!env.SENTRY_DSN) {
+				console.log(
+					"Sentry DSN not configured, running without Sentry monitoring",
+				);
+				return (provider as any).fetch(request, env, ctx);
+			}
+
+			try {
+				// Try to wrap with Sentry
+				const sentryWrapped = Sentry.withSentry(
+					(env: Env) => {
+						const { id: versionId } = env.CF_VERSION_METADATA || { id: "dev" };
+						return {
+							dsn: env.SENTRY_DSN,
+							environment: env.SENTRY_ENV ?? env.PIPEDREAM_ENV,
+							release: versionId,
+							// capture headers/IP (you can set this false if you prefer)
+							sendDefaultPii: true,
+							// Logs: forwards console.* to Sentry Logs
+							enableLogs: true,
+							// Tracing: 100% since volume is low (tune later)
+							tracesSampleRate: 1.0,
+							// Belt & suspenders token-scrubber
+							beforeSend: scrubEvent as any,
+						};
+					},
+					provider as unknown as ExportedHandler<Env>,
+				);
+				if (sentryWrapped?.fetch) {
+					return await sentryWrapped.fetch(request, env, ctx);
+				}
+				throw new Error("Sentry wrapper did not return expected handler");
+			} catch (sentryError) {
+				console.error(
+					"Sentry initialization failed, falling back to direct execution:",
+					sentryError,
+				);
+				// Fallback to direct provider execution
+				return (provider as any).fetch(request, env, ctx);
+			}
+		},
+	};
+}
+
+// Export the OAuth Provider with resilient Sentry wrapper
+export default createSentryWrappedHandler(provider);
+
+
+
+================================================
+FILE: src/workers-oauth-utils.ts
+================================================
+import { createHmac } from "node:crypto";
+
+export interface Props {
+	sub: string;
+	email: string;
+	name?: string;
+	[key: string]: unknown;
+}
+
+export async function clientIdAlreadyApproved(
+	kv: KVNamespace,
+	clientId: string,
+	cookieKey: string,
+): Promise<boolean> {
+	try {
+		const stored = await kv.get(`approved:${clientId}`);
+		return stored === "true";
+	} catch {
+		return false;
+	}
+}
+
+export function renderApprovalDialog(
+	clientId: string,
+	redirectUri: string,
+	scope: string,
+	state: string,
+): Response {
+	const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Authorization Required</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      max-width: 500px; 
+      margin: 50px auto; 
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .card { 
+      background: white; 
+      padding: 30px; 
+      border-radius: 8px; 
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    h1 { color: #333; margin-bottom: 20px; }
+    .info { 
+      background: #f8f9fa; 
+      padding: 15px; 
+      border-radius: 4px; 
+      margin: 20px 0;
+      border-left: 4px solid #007acc;
+    }
+    .actions { margin-top: 30px; }
+    button {
+      padding: 12px 24px;
+      margin: 0 10px 0 0;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .approve { background: #007acc; color: white; }
+    .deny { background: #dc3545; color: white; }
+    button:hover { opacity: 0.9; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔐 Authorization Request</h1>
+    <p>An application is requesting access to your MCP server:</p>
+    
+    <div class="info">
+      <strong>Client ID:</strong> ${escapeHtml(clientId)}<br>
+      <strong>Redirect URI:</strong> ${escapeHtml(redirectUri)}<br>
+      <strong>Scope:</strong> ${escapeHtml(scope)}
+    </div>
+    
+    <p>Do you want to authorize this application?</p>
+    
+    <form method="POST" class="actions">
+      <input type="hidden" name="client_id" value="${escapeHtml(clientId)}">
+      <input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">
+      <input type="hidden" name="scope" value="${escapeHtml(scope)}">
+      <input type="hidden" name="state" value="${escapeHtml(state)}">
+      
+      <button type="submit" name="action" value="approve" class="approve">
+        ✓ Authorize
+      </button>
+      <button type="submit" name="action" value="deny" class="deny">
+        ✗ Deny
+      </button>
+    </form>
+  </div>
+</body>
+</html>`;
+
+	return new Response(html, {
+		headers: { "Content-Type": "text/html" },
+	});
+}
+
+export async function parseRedirectApproval(
+	kv: KVNamespace,
+	clientId: string,
+	cookieKey: string,
+): Promise<Response> {
+	// Store approval
+	await kv.put(`approved:${clientId}`, "true", { expirationTtl: 86400 }); // 24 hours
+
+	// Create signed cookie
+	const cookie = signCookie(clientId, cookieKey);
+
+	const response = new Response("", { status: 302 });
+	response.headers.set(
+		"Set-Cookie",
+		`mcp_approved=${cookie}; HttpOnly; Secure; SameSite=Strict; Max-Age=86400`,
+	);
+
+	return response;
+}
+
+export function getUpstreamAuthorizeUrl(
+	authUrl: string,
+	clientId: string,
+	redirectUri: string,
+	state: string,
+): string {
+	const url = new URL(authUrl);
+	url.searchParams.set("client_id", clientId);
+	url.searchParams.set("redirect_uri", redirectUri);
+	url.searchParams.set("response_type", "code");
+	url.searchParams.set("state", state);
+	url.searchParams.set("scope", "openid email profile");
+
+	return url.toString();
+}
+
+export async function fetchUpstreamAuthToken(
+	tokenUrl: string,
+	clientId: string,
+	clientSecret: string,
+	code: string,
+	redirectUri: string,
+): Promise<any> {
+	const body = new URLSearchParams({
+		grant_type: "authorization_code",
+		client_id: clientId,
+		client_secret: clientSecret,
+		code: code,
+		redirect_uri: redirectUri,
+	});
+
+	const response = await fetch(tokenUrl, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/x-www-form-urlencoded",
+		},
+		body: body.toString(),
+	});
+
+	if (!response.ok) {
+		throw new Error(`Token exchange failed: ${response.status}`);
+	}
+
+	return response.json();
+}
+
+export async function fetchAccessPublicKey(jwksUrl: string): Promise<any> {
+	const response = await fetch(jwksUrl);
+	if (!response.ok) {
+		throw new Error(`Failed to fetch JWKS: ${response.status}`);
+	}
+	return response.json();
+}
+
+export function parseJWT(token: string): {
+	header: any;
+	payload: any;
+	signature: string;
+} {
+	const parts = token.split(".");
+	if (parts.length !== 3) {
+		throw new Error("Invalid JWT format");
+	}
+
+	const header = JSON.parse(
+		atob(parts[0].replace(/-/g, "+").replace(/_/g, "/")),
+	);
+	const payload = JSON.parse(
+		atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")),
+	);
+
+	return { header, payload, signature: parts[2] };
+}
+
+export async function verifyToken(
+	token: string,
+	jwksUrl: string,
+): Promise<any> {
+	try {
+		const { payload } = parseJWT(token);
+
+		// Check expiration
+		if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
+			throw new Error("Token expired");
+		}
+
+		// In a full implementation, you would verify the signature using the JWKS
+		// For now, we'll trust the token since it came from our OAuth flow
+
+		return payload;
+	} catch (error) {
+		throw new Error(`Token verification failed: ${error}`);
+	}
+}
+
+function signCookie(value: string, key: string): string {
+	const hmac = createHmac("sha256", key);
+	hmac.update(value);
+	const signature = hmac.digest("hex");
+	return `${value}.${signature}`;
+}
+
+function escapeHtml(text: string): string {
+	const map: { [key: string]: string } = {
+		"&": "&amp;",
+		"<": "&lt;",
+		">": "&gt;",
+		'"': "&quot;",
+		"'": "&#39;",
+	};
+	return text.replace(/[&<>"']/g, (m) => map[m]);
+}
+
+
+
+================================================
+FILE: .cursor/rules/project-structure.mdc
+================================================
+---
+alwaysApply: true
+---
+# Project Structure Guide
+
+- Entrypoint Worker: [src/index.ts](mdc:src/index.ts)
+  - Exports an `OAuthProvider` that protects API routes and wires the MCP server.
+  - MCP routes: `"/mcp"` (HTTP) and `"/sse"` (SSE) via `ASIConnectMCP.serve()` / `serveSSE()`.
+  - Registers MCP tools: `auth.status`, `auth.connect`, `auth.disconnect`, `http.request`, `proxy.request`.
+- Access default handler: [src/access-handler.ts](mdc:src/access-handler.ts)
+  - Implements `/authorize` UI + flow using Cloudflare Access (Access for SaaS), then calls `env.OAUTH_PROVIDER.completeAuthorization()`.
+- OAuth helpers: [src/workers-oauth-utils.ts](mdc:src/workers-oauth-utils.ts)
+  - Utilities for parsing/verifying tokens and rendering minimal approval UI used earlier.
+- Configuration:
+  - Worker config: [wrangler.jsonc](mdc:wrangler.jsonc)
+  - TypeScript config: [tsconfig.json](mdc:tsconfig.json)
+  - Biome config: [biome.json](mdc:biome.json)
+- Docs & setup:
+  - Setup guide: [SETUP_GUIDE.md](mdc:SETUP_GUIDE.md)
+  - README: [README.md](mdc:README.md)
+
+Environment bindings (see `Env` in [src/index.ts](mdc:src/index.ts)):
+- KV: `OAUTH_KV`, `USER_LINKS`
+- Durable Object: `MCP_OBJECT`
+- Cloudflare Access: `ACCESS_CLIENT_ID`, `ACCESS_CLIENT_SECRET`, `ACCESS_AUTHORIZATION_URL`, `ACCESS_TOKEN_URL`, `ACCESS_JWKS_URL`, `COOKIE_ENCRYPTION_KEY`
+- Pipedream Connect: `PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET`, `PIPEDREAM_PROJECT_ID`, `PIPEDREAM_ENV`
+

@@ -4,6 +4,7 @@ export interface Props {
 	sub: string;
 	email: string;
 	name?: string;
+	tenant_id?: string;
 	[key: string]: unknown;
 }
 
@@ -202,15 +203,68 @@ export async function verifyToken(
 	jwksUrl: string,
 ): Promise<any> {
 	try {
-		const { payload } = parseJWT(token);
+		const { header, payload, signature } = parseJWT(token);
 
 		// Check expiration
 		if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
 			throw new Error("Token expired");
 		}
 
-		// In a full implementation, you would verify the signature using the JWKS
-		// For now, we'll trust the token since it came from our OAuth flow
+		// Verify signature using JWKS
+		if (jwksUrl) {
+			const jwks = await fetchAccessPublicKey(jwksUrl);
+
+			// Find the matching key by kid (key ID)
+			const key = jwks.keys?.find((k: any) => k.kid === header.kid);
+			if (!key) {
+				throw new Error("Unable to find matching key in JWKS");
+			}
+
+			// For RS256 (most common), verify using Web Crypto API
+			if (header.alg === "RS256" && key.kty === "RSA") {
+				const publicKey = await crypto.subtle.importKey(
+					"jwk",
+					{
+						kty: key.kty,
+						n: key.n,
+						e: key.e,
+						alg: "RS256",
+						use: "sig",
+					},
+					{
+						name: "RSASSA-PKCS1-v1_5",
+						hash: "SHA-256",
+					},
+					false,
+					["verify"],
+				);
+
+				const encoder = new TextEncoder();
+				const data = encoder.encode(
+					`${token.split(".")[0]}.${token.split(".")[1]}`,
+				);
+				const signatureBytes = Uint8Array.from(
+					atob(signature.replace(/-/g, "+").replace(/_/g, "/")),
+					(c) => c.charCodeAt(0),
+				);
+
+				const isValid = await crypto.subtle.verify(
+					"RSASSA-PKCS1-v1_5",
+					publicKey,
+					signatureBytes,
+					data,
+				);
+
+				if (!isValid) {
+					throw new Error("Invalid token signature");
+				}
+			} else {
+				// For non-RS256, fall back to basic validation (could extend for other algorithms)
+				console.warn(
+					`JWT algorithm ${header.alg} not fully supported, skipping signature verification`,
+				);
+			}
+		}
 
 		return payload;
 	} catch (error) {
