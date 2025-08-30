@@ -363,6 +363,92 @@ interface SystemAppConfigEntry {
 
 type SystemAppsConfig = SystemAppConfigEntry[];
 
+// Shared API monitoring utilities
+interface APIMonitoringContext {
+	method: string;
+	url: string;
+	app: string;
+	latency: number;
+	status: number;
+	requestSize: number;
+	responseSize: number;
+	headersCount: number;
+	userId?: string;
+	userEmail?: string;
+	accountId?: string;
+	authType?: string;
+	requestPreview?: string;
+	responsePreview?: string;
+	host?: string;
+}
+
+function logAPIRequest(method: string, url: string, app: string, requestSize: number, headersCount: number, userContext?: string): void {
+	const userInfo = userContext ? ` [${userContext}]` : '';
+	console.log(`🚀 API Request: ${method} ${url} [App: ${app}]${userInfo}`);
+	console.log(`📊 Request size: ${requestSize} bytes, Headers: ${headersCount}`);
+}
+
+function logAPIResponse(status: number, latency: number, responseSize: number, app: string): void {
+	console.log(`✅ API Response: ${status} [${latency}ms, ${responseSize} bytes, App: ${app}]`);
+}
+
+function createAPIBreadcrumb(context: APIMonitoringContext, category: "mcp.proxy.response" | "mcp.system.response"): void {
+	try {
+		if (typeof Sentry !== 'undefined') {
+			const success = context.status >= 200 && context.status < 400;
+			const performanceTier = context.latency < 500 ? "fast" : context.latency < 2000 ? "medium" : "slow";
+			
+			Sentry.addBreadcrumb({
+				category,
+				level: context.status >= 500 ? "error" : context.status >= 400 ? "warning" : "info",
+				data: {
+					// Response metrics
+					status: context.status,
+					latency_ms: context.latency,
+					success,
+					response_size_bytes: context.responseSize,
+					
+					// Request context
+					method: context.method,
+					app: context.app,
+					...(context.userId && { user_id: context.userId }),
+					...(context.userEmail && { user_email: context.userEmail }),
+					...(context.accountId && { account_id: context.accountId }),
+					
+					// Request details
+					request_size_bytes: context.requestSize,
+					headers_count: context.headersCount,
+					
+					// Target info
+					...(context.host && { host: context.host }),
+					
+					// Performance categorization
+					performance_tier: performanceTier,
+					
+					// Auth context for system requests
+					...(context.authType && { auth_type: context.authType }),
+					
+					// Sanitized request/response preview
+					...(context.requestPreview && { request_preview: context.requestPreview }),
+					...(context.responsePreview && { response_preview: context.responsePreview }),
+				},
+			});
+			
+			// For slow requests or errors, also capture as Sentry events for visibility
+			if (context.latency > 3000 || context.status >= 400) {
+				const eventLevel = context.status >= 500 ? 'error' : context.status >= 400 ? 'warning' : 'info';
+				const requestType = category === 'mcp.system.response' ? 'System API' : 'API';
+				Sentry.captureMessage(
+					`${requestType} ${success ? 'Performance' : 'Error'}: ${context.method} ${context.app} - ${context.status} in ${context.latency}ms`, 
+					eventLevel
+				);
+			}
+		}
+	} catch (e) {
+		// Silent fallback for Sentry operations
+	}
+}
+
 function getSystemAppsConfig(env: Env): SystemAppsConfig {
 	// Initial system apps are hard-coded. This can be extended or loaded from KV later.
 	const gamma: SystemAppConfigEntry = {
@@ -562,8 +648,8 @@ async function directSystemRequest(
 		const requestSize = bodyToSend ? (typeof bodyToSend === 'string' ? bodyToSend.length : JSON.stringify(bodyToSend).length) : 0;
 		const headersCount = Object.keys(requestHeaders).length;
 		
-		console.log(`🚀 System API Request: ${params.method} ${finalUrl} [App: ${params.app.appSlug}]`);
-		console.log(`📊 Request size: ${requestSize} bytes, Headers: ${headersCount}`);
+		// Log request using shared utility
+		logAPIRequest(params.method, finalUrl, params.app.appSlug, requestSize, headersCount);
 		
 		const resp = await fetch(finalUrl, {
 			method: params.method,
@@ -583,60 +669,27 @@ async function directSystemRequest(
 		}
 		
 		const responseSize = text.length;
-		const success = resp.status >= 200 && resp.status < 400;
 		
-		console.log(`✅ System API Response: ${resp.status} [${latency}ms, ${responseSize} bytes, App: ${params.app.appSlug}]`);
+		// Log response using shared utility
+		logAPIResponse(resp.status, latency, responseSize, params.app.appSlug);
 		
-		// Add system request breadcrumb for Sentry
-		try {
-			if (typeof Sentry !== 'undefined') {
-				Sentry.addBreadcrumb({
-					category: "mcp.system.response",
-					level: resp.status >= 500 ? "error" : resp.status >= 400 ? "warning" : "info",
-					data: {
-						// Response metrics
-						status: resp.status,
-						latency_ms: latency,
-						success,
-						response_size_bytes: responseSize,
-						
-						// Request context
-						method: params.method,
-						app: params.app.appSlug,
-						
-						// Request details
-						request_size_bytes: requestSize,
-						headers_count: headersCount,
-						
-						// Target info
-						host: new URL(finalUrl).hostname,
-						
-						// Performance categorization
-						performance_tier: latency < 500 ? "fast" : latency < 2000 ? "medium" : "slow",
-						
-						// Auth type context
-						auth_type: params.app.auth.type,
-						
-						// Sanitized request/response preview (first 200 chars)
-						request_preview: bodyToSend ? 
-							(typeof bodyToSend === 'string' ? bodyToSend : JSON.stringify(bodyToSend)).substring(0, 200) + (requestSize > 200 ? '...' : '') 
-							: null,
-						response_preview: text.substring(0, 200) + (responseSize > 200 ? '...' : ''),
-					},
-				});
-				
-				// For slow requests or errors, also capture as Sentry events
-				if (latency > 3000 || resp.status >= 400) {
-					const eventLevel = resp.status >= 500 ? 'error' : resp.status >= 400 ? 'warning' : 'info';
-					Sentry.captureMessage(
-						`System API ${success ? 'Performance' : 'Error'}: ${params.method} ${params.app.appSlug} - ${resp.status} in ${latency}ms`, 
-						eventLevel
-					);
-				}
-			}
-		} catch (e) {
-			// Silent fallback for Sentry operations
-		}
+		// Create breadcrumb using shared utility
+		createAPIBreadcrumb({
+			method: params.method,
+			url: finalUrl,
+			app: params.app.appSlug,
+			latency,
+			status: resp.status,
+			requestSize,
+			responseSize,
+			headersCount,
+			authType: params.app.auth.type,
+			host: new URL(finalUrl).hostname,
+			requestPreview: bodyToSend ? 
+				(typeof bodyToSend === 'string' ? bodyToSend : JSON.stringify(bodyToSend)).substring(0, 200) + (requestSize > 200 ? '...' : '') 
+				: undefined,
+			responsePreview: text.substring(0, 200) + (responseSize > 200 ? '...' : ''),
+		}, "mcp.system.response");
 		
 		return { status: resp.status, data };
 	};
@@ -1838,12 +1891,13 @@ ${
 						const userId = this.getExternalUserId();
 						const userEmail = this.props?.email as string | undefined;
 
-						// Log request details
+						// Calculate request details
 						const requestSize = proxyBody ? JSON.stringify(proxyBody).length : 0;
 						const headersCount = processedHeaders ? Object.keys(processedHeaders).length : 0;
 
-						console.log(`🚀 API Request: ${method} ${url} [App: ${resolvedApp}, User: ${userEmail || userId}]`);
-						console.log(`📊 Request size: ${requestSize} bytes, Headers: ${headersCount}`);
+						// Log request using shared utility
+						const userContext = `App: ${resolvedApp}, User: ${userEmail || userId}`;
+						logAPIRequest(method, url, resolvedApp, requestSize, headersCount, userContext);
 
 						const resp = await proxyRequest(this.env, pdToken!, {
 							external_user_id,
@@ -1859,70 +1913,31 @@ ${
 						
 						// Calculate response details
 						const responseSize = resp.data ? JSON.stringify(resp.data).length : 0;
-						const success = resp.status >= 200 && resp.status < 400;
 
-						// Enhanced logging with latency and response details
-						console.log(`✅ API Response: ${resp.status} [${latency}ms, ${responseSize} bytes, App: ${resolvedApp}]`);
+						// Log response using shared utility
+						logAPIResponse(resp.status, latency, responseSize, resolvedApp);
 
-						// Safely add comprehensive breadcrumb with detailed metrics
-						try {
-							if (this.env.SENTRY_DSN) {
-								Sentry.addBreadcrumb({
-									category: "mcp.proxy.response",
-									level:
-										resp.status >= 500
-											? "error"
-											: resp.status >= 400
-												? "warning"
-												: "info",
-									data: {
-										// Response metrics
-										status: resp.status,
-										latency_ms: latency,
-										success,
-										response_size_bytes: responseSize,
-										
-										// Request context
-										method,
-										app: resolvedApp,
-										user_id: userId,
-										user_email: userEmail,
-										account_id: acctId,
-										
-										// Request details
-										request_size_bytes: requestSize,
-										headers_count: headersCount,
-										
-										// Target info
-										host: isFullUrl
-											? new URL(url).hostname
-											: "api.pipedream.com",
-										
-										// Performance categorization
-										performance_tier: latency < 500 ? "fast" : latency < 2000 ? "medium" : "slow",
-										
-										// Sanitized request/response preview (first 200 chars)
-										request_preview: proxyBody ? 
-											JSON.stringify(proxyBody).substring(0, 200) + (requestSize > 200 ? '...' : '') 
-											: null,
-										response_preview: resp.data ? 
-											JSON.stringify(resp.data).substring(0, 200) + (responseSize > 200 ? '...' : '') 
-											: null,
-									},
-								});
-								
-								// For slow requests or errors, also capture as Sentry events for visibility
-								if (latency > 3000 || resp.status >= 400) {
-									const eventLevel = resp.status >= 500 ? 'error' : resp.status >= 400 ? 'warning' : 'info';
-									Sentry.captureMessage(
-										`API ${success ? 'Performance' : 'Error'}: ${method} ${resolvedApp} - ${resp.status} in ${latency}ms`, 
-										eventLevel
-									);
-								}
-							}
-						} catch (sentryError) {
-							console.warn(`Sentry breadcrumb failed:`, sentryError);
-						}
+						// Create breadcrumb using shared utility
+						createAPIBreadcrumb({
+							method,
+							url,
+							app: resolvedApp,
+							latency,
+							status: resp.status,
+							requestSize,
+							responseSize,
+							headersCount,
+							userId,
+							userEmail,
+							accountId: acctId,
+							host: isFullUrl ? new URL(url).hostname : "api.pipedream.com",
+							requestPreview: proxyBody ? 
+								JSON.stringify(proxyBody).substring(0, 200) + (requestSize > 200 ? '...' : '') 
+								: undefined,
+							responsePreview: resp.data ? 
+								JSON.stringify(resp.data).substring(0, 200) + (responseSize > 200 ? '...' : '') 
+								: undefined,
+						}, "mcp.proxy.response");
 
 						return resp;
 					};
