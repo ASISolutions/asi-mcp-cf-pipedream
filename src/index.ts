@@ -1071,6 +1071,76 @@ ${
 			},
 		);
 
+		// -------- assistant_instructions resource --------
+		this.server.resource("assistant_instructions", async () => {
+			const external_user_id = this.getExternalUserId();
+			const pdToken = await getPdAccessToken(this.env);
+
+			// Get currently connected apps for this user
+			const res = await listAccountsForUser(
+				this.env,
+				pdToken,
+				external_user_id,
+				undefined,
+				false,
+			);
+
+			const connectedApps = (res.data || []).map((a) => ({
+				app: a.app?.name_slug,
+				account_id: a.id,
+				healthy: a.healthy,
+				dead: a.dead,
+			}));
+
+			const instructions = `
+## Assistant Instructions
+
+If the user asks you to perform a task, search for the relevant SOP and follow it. The SOP will contain the required apps and HTTP requests to make with the asi_magic_tool.
+
+If the user needs to connect to an app, use the app slug from the SOP. If it's not in the SOP, you can search for the app with the search_apps tool.
+
+## Currently Connected Apps
+
+${
+	connectedApps.length > 0
+		? connectedApps
+				.map(
+					(app) =>
+						`- **${app.app}** (${app.healthy ? "healthy" : app.dead ? "dead" : "unknown status"}) - Account ID: ${app.account_id}`,
+				)
+				.join("\n")
+		: "- No apps currently connected"
+}
+
+## Key Steps for Task Execution
+
+1. **Search for relevant SOPs** using the \`search_sop_docs\` tool
+2. **Follow the SOP process** - it contains the required apps and API calls
+3. **Connect to required apps** if not already connected using \`auth_connect\` with the app slug from the SOP
+4. **Make API requests** using the \`asi_magic_tool\` as specified in the SOP
+5. **Handle any authentication** - if a request fails with auth required, use the connect URL provided
+
+## Available Tools
+- \`search_sop_docs\` - Search ASI Solutions documentation for processes
+- \`get_sop_process\` - Get specific SOP by process code (e.g., FIN-001)
+- \`search_apps\` - Find available apps to connect to
+- \`auth_connect\` - Generate connection links for apps
+- \`auth_status\` - Check current connection status
+- \`asi_magic_tool\` - Make authenticated API requests
+- \`send_feedback\` - Report issues or request new features
+`;
+
+			return {
+				contents: [
+					{
+						uri: "file://assistant_instructions.md",
+						mimeType: "text/markdown",
+						text: instructions.trim(),
+					},
+				],
+			};
+		});
+
 		// ---- Helper: GitHub issue creation ----
 		const createGithubIssue = async (
 			title: string,
