@@ -397,6 +397,11 @@ function deriveTenantId(requestUrl: string, claims: Record<string, unknown>): st
 		if (parts.length >= 3) {
 			const subdomain = parts[0];
 			if (subdomain.length >= 3 && subdomain !== "www") {
+				// Handle ASI MCP production domains: [tenant].mcp.asi.nz
+				if (hostname.endsWith('.mcp.asi.nz')) {
+					return validateTenantId(subdomain);
+				}
+
 				// Handle Cloudflare Workers URLs (*.*.workers.dev)
 				if (
 					parts[parts.length - 2] === "workers" &&
@@ -406,10 +411,10 @@ function deriveTenantId(requestUrl: string, claims: Record<string, unknown>): st
 					return validateTenantId(subdomain);
 				}
 
-				// For custom domains like "acme.mcp.example.com"
-				// Include second level for uniqueness: "acme-mcp"
+				// For other custom domains, include second level for uniqueness
+				// Example: "acme.api.example.com" → "acme-api"
 				const secondLevel = parts[1];
-				if (secondLevel && secondLevel !== "mcp") {
+				if (secondLevel) {
 					return validateTenantId(`${subdomain}-${secondLevel}`);
 				}
 				return validateTenantId(subdomain);
