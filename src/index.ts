@@ -363,6 +363,92 @@ interface SystemAppConfigEntry {
 
 type SystemAppsConfig = SystemAppConfigEntry[];
 
+// Shared API monitoring utilities
+interface APIMonitoringContext {
+	method: string;
+	url: string;
+	app: string;
+	latency: number;
+	status: number;
+	requestSize: number;
+	responseSize: number;
+	headersCount: number;
+	userId?: string;
+	userEmail?: string;
+	accountId?: string;
+	authType?: string;
+	requestPreview?: string;
+	responsePreview?: string;
+	host?: string;
+}
+
+function logAPIRequest(method: string, url: string, app: string, requestSize: number, headersCount: number, userContext?: string): void {
+	const userInfo = userContext ? ` [${userContext}]` : '';
+	console.log(`🚀 API Request: ${method} ${url} [App: ${app}]${userInfo}`);
+	console.log(`📊 Request size: ${requestSize} bytes, Headers: ${headersCount}`);
+}
+
+function logAPIResponse(status: number, latency: number, responseSize: number, app: string): void {
+	console.log(`✅ API Response: ${status} [${latency}ms, ${responseSize} bytes, App: ${app}]`);
+}
+
+function createAPIBreadcrumb(context: APIMonitoringContext, category: "mcp.proxy.response" | "mcp.system.response"): void {
+	try {
+		if (typeof Sentry !== 'undefined') {
+			const success = context.status >= 200 && context.status < 400;
+			const performanceTier = context.latency < 500 ? "fast" : context.latency < 2000 ? "medium" : "slow";
+			
+			Sentry.addBreadcrumb({
+				category,
+				level: context.status >= 500 ? "error" : context.status >= 400 ? "warning" : "info",
+				data: {
+					// Response metrics
+					status: context.status,
+					latency_ms: context.latency,
+					success,
+					response_size_bytes: context.responseSize,
+					
+					// Request context
+					method: context.method,
+					app: context.app,
+					...(context.userId && { user_id: context.userId }),
+					...(context.userEmail && { user_email: context.userEmail }),
+					...(context.accountId && { account_id: context.accountId }),
+					
+					// Request details
+					request_size_bytes: context.requestSize,
+					headers_count: context.headersCount,
+					
+					// Target info
+					...(context.host && { host: context.host }),
+					
+					// Performance categorization
+					performance_tier: performanceTier,
+					
+					// Auth context for system requests
+					...(context.authType && { auth_type: context.authType }),
+					
+					// Sanitized request/response preview
+					...(context.requestPreview && { request_preview: context.requestPreview }),
+					...(context.responsePreview && { response_preview: context.responsePreview }),
+				},
+			});
+			
+			// For slow requests or errors, also capture as Sentry events for visibility
+			if (context.latency > 3000 || context.status >= 400) {
+				const eventLevel = context.status >= 500 ? 'error' : context.status >= 400 ? 'warning' : 'info';
+				const requestType = category === 'mcp.system.response' ? 'System API' : 'API';
+				Sentry.captureMessage(
+					`${requestType} ${success ? 'Performance' : 'Error'}: ${context.method} ${context.app} - ${context.status} in ${context.latency}ms`, 
+					eventLevel
+				);
+			}
+		}
+	} catch (e) {
+		// Silent fallback for Sentry operations
+	}
+}
+
 function getSystemAppsConfig(env: Env): SystemAppsConfig {
 	// Initial system apps are hard-coded. This can be extended or loaded from KV later.
 	const gamma: SystemAppConfigEntry = {
@@ -558,11 +644,22 @@ async function directSystemRequest(
 	const executeRequest = async (
 		requestHeaders: Record<string, string>,
 	): Promise<{ status: number; data: any }> => {
+		const startTime = Date.now();
+		const requestSize = bodyToSend ? (typeof bodyToSend === 'string' ? bodyToSend.length : JSON.stringify(bodyToSend).length) : 0;
+		const headersCount = Object.keys(requestHeaders).length;
+		
+		// Log request using shared utility
+		logAPIRequest(params.method, finalUrl, params.app.appSlug, requestSize, headersCount);
+		
 		const resp = await fetch(finalUrl, {
 			method: params.method,
 			headers: requestHeaders,
 			body: bodyToSend,
 		});
+		
+		const endTime = Date.now();
+		const latency = endTime - startTime;
+		
 		const text = await resp.text();
 		let data: any;
 		try {
@@ -570,6 +667,30 @@ async function directSystemRequest(
 		} catch {
 			data = text;
 		}
+		
+		const responseSize = text.length;
+		
+		// Log response using shared utility
+		logAPIResponse(resp.status, latency, responseSize, params.app.appSlug);
+		
+		// Create breadcrumb using shared utility
+		createAPIBreadcrumb({
+			method: params.method,
+			url: finalUrl,
+			app: params.app.appSlug,
+			latency,
+			status: resp.status,
+			requestSize,
+			responseSize,
+			headersCount,
+			authType: params.app.auth.type,
+			host: new URL(finalUrl).hostname,
+			requestPreview: bodyToSend ? 
+				(typeof bodyToSend === 'string' ? bodyToSend : JSON.stringify(bodyToSend)).substring(0, 200) + (requestSize > 200 ? '...' : '') 
+				: undefined,
+			responsePreview: text.substring(0, 200) + (responseSize > 200 ? '...' : ''),
+		}, "mcp.system.response");
+		
 		return { status: resp.status, data };
 	};
 
@@ -1072,7 +1193,7 @@ ${
 		);
 
 		// -------- assistant_instructions resource --------
-		this.server.resource("assistant_instructions", async () => {
+		this.server.resource("assistant_instructions", "Get assistant instructions as a resource", async () => {
 			const external_user_id = this.getExternalUserId();
 			const pdToken = await getPdAccessToken(this.env);
 
@@ -1388,7 +1509,7 @@ ${
 					if (!res.ok)
 						throw new Error(`Pipedream apps search error ${res.status}`);
 					const body = (await res.json()) as { data?: PdAppInfo[] };
-					let allApps = body.data || [];
+					const allApps = body.data || [];
 
 					// Apply additional client-side filters for parameters not supported by API
 					let filteredApps = allApps;
@@ -1766,6 +1887,18 @@ ${
 					// Add nested span for the actual HTTP request (with fallback)
 					let result: any;
 					const executeProxyRequest = async () => {
+						const startTime = Date.now();
+						const userId = this.getExternalUserId();
+						const userEmail = this.props?.email as string | undefined;
+
+						// Calculate request details
+						const requestSize = proxyBody ? JSON.stringify(proxyBody).length : 0;
+						const headersCount = processedHeaders ? Object.keys(processedHeaders).length : 0;
+
+						// Log request using shared utility
+						const userContext = `App: ${resolvedApp}, User: ${userEmail || userId}`;
+						logAPIRequest(method, url, resolvedApp, requestSize, headersCount, userContext);
+
 						const resp = await proxyRequest(this.env, pdToken!, {
 							external_user_id,
 							account_id: acctId,
@@ -1775,29 +1908,36 @@ ${
 							body: proxyBody,
 						});
 
-						// Safely add breadcrumb with response info
-						try {
-							if (this.env.SENTRY_DSN) {
-								Sentry.addBreadcrumb({
-									category: "mcp.proxy.response",
-									level:
-										resp.status >= 500
-											? "error"
-											: resp.status >= 400
-												? "warning"
-												: "info",
-									data: {
-										status: resp.status,
-										app: resolvedApp,
-										host: isFullUrl
-											? new URL(url).hostname
-											: "api.pipedream.com",
-									},
-								});
-							}
-						} catch (sentryError) {
-							console.warn(`Sentry breadcrumb failed:`, sentryError);
-						}
+						const endTime = Date.now();
+						const latency = endTime - startTime;
+						
+						// Calculate response details
+						const responseSize = resp.data ? JSON.stringify(resp.data).length : 0;
+
+						// Log response using shared utility
+						logAPIResponse(resp.status, latency, responseSize, resolvedApp);
+
+						// Create breadcrumb using shared utility
+						createAPIBreadcrumb({
+							method,
+							url,
+							app: resolvedApp,
+							latency,
+							status: resp.status,
+							requestSize,
+							responseSize,
+							headersCount,
+							userId,
+							userEmail,
+							accountId: acctId,
+							host: isFullUrl ? new URL(url).hostname : "api.pipedream.com",
+							requestPreview: proxyBody ? 
+								JSON.stringify(proxyBody).substring(0, 200) + (requestSize > 200 ? '...' : '') 
+								: undefined,
+							responsePreview: resp.data ? 
+								JSON.stringify(resp.data).substring(0, 200) + (responseSize > 200 ? '...' : '') 
+								: undefined,
+						}, "mcp.proxy.response");
 
 						return resp;
 					};
@@ -1806,18 +1946,50 @@ ${
 						try {
 							result = await Sentry.startSpan(
 								{
-									name: "mcp.proxy.request",
+									name: `mcp.proxy.${resolvedApp}.${method}`,
 									op: "http.client",
 									attributes: {
+										// Standard HTTP attributes
 										"http.method": method,
 										"http.url": new URL(url, "https://example.com").origin, // avoid path params in spans
 										"dest.host": isFullUrl
 											? new URL(url).hostname
 											: "api.pipedream.com",
+										
+										// MCP context
 										"mcp.app": resolvedApp ?? "unknown",
+										"mcp.user.sub": external_user_id,
+										"mcp.user.email": this.props?.email as string || "unknown",
+										"mcp.account_id": acctId || "unknown",
+										
+										// Request metadata
+										"mcp.request.size_bytes": proxyBody ? JSON.stringify(proxyBody).length : 0,
+										"mcp.request.headers_count": processedHeaders ? Object.keys(processedHeaders).length : 0,
+										"mcp.request.has_body": !!proxyBody,
 									},
 								},
-								executeProxyRequest,
+								async (span) => {
+									const spanStartTime = Date.now();
+									const result = await executeProxyRequest();
+									const spanLatency = Date.now() - spanStartTime;
+									
+									// Add result attributes to span after execution
+									if (span) {
+										try {
+											span.setAttributes({
+												"http.status_code": result.status,
+												"mcp.response.success": result.status >= 200 && result.status < 400,
+												"mcp.response.size_bytes": result.data ? JSON.stringify(result.data).length : 0,
+												"mcp.span.latency_ms": spanLatency,
+												"mcp.latency_category": spanLatency < 500 ? "fast" : spanLatency < 2000 ? "medium" : "slow"
+											});
+										} catch (e) {
+											// Silent fallback for span attribute setting
+										}
+									}
+									
+									return result;
+								}
 							);
 						} catch (sentryError) {
 							console.warn(
@@ -2250,7 +2422,7 @@ function scrubEvent(event: Sentry.Event): Sentry.Event {
 		if (!obj || typeof obj !== "object") return;
 		for (const k of Object.keys(obj)) {
 			if (
-				/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret)/i.test(
+				/(authorization|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|key)/i.test(
 					k,
 				)
 			) {
@@ -2260,10 +2432,35 @@ function scrubEvent(event: Sentry.Event): Sentry.Event {
 			}
 		}
 	};
+
+	// Redact sensitive data from all parts of the event
 	redact((event as any).request);
 	redact(event.contexts);
 	redact(event.extra);
 	redact((event as any).breadcrumbs);
+	
+	// Also scrub log messages for sensitive content
+	if (event.message) {
+		event.message = event.message.replace(
+			/(token|password|secret|key)\s*[=:]\s*[^\s]+/gi,
+			'$1=[redacted]'
+		);
+	}
+
+	// Scrub breadcrumb messages
+	if (event.breadcrumbs) {
+		event.breadcrumbs = event.breadcrumbs.map(breadcrumb => {
+			if (breadcrumb.message) {
+				breadcrumb.message = breadcrumb.message.replace(
+					/(token|password|secret|key)\s*[=:]\s*[^\s]+/gi,
+					'$1=[redacted]'
+				);
+			}
+			redact(breadcrumb.data);
+			return breadcrumb;
+		});
+	}
+
 	return event;
 }
 
@@ -2408,6 +2605,98 @@ const provider = new OAuthProvider({
 	scopesSupported: ["openid", "email", "profile"],
 });
 
+// Custom console wrapper to ensure all logs reach Sentry
+function wrapConsoleForSentry() {
+	const originalConsole = {
+		log: console.log,
+		error: console.error,
+		warn: console.warn,
+		info: console.info,
+		debug: console.debug,
+	};
+
+	// Wrap console methods to also send to Sentry as messages
+	console.log = (...args) => {
+		originalConsole.log(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'info',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.info = (...args) => {
+		originalConsole.info(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'info',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.warn = (...args) => {
+		originalConsole.warn(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'warning',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.error = (...args) => {
+		originalConsole.error(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'error',
+					category: 'console',
+				});
+				// Also capture errors as Sentry events for visibility
+				const errorMessage = args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' ');
+				Sentry.captureMessage(errorMessage, 'error');
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	console.debug = (...args) => {
+		originalConsole.debug(...args);
+		try {
+			if (typeof Sentry !== 'undefined') {
+				Sentry.addBreadcrumb({
+					message: args.map(arg => typeof arg === 'object' ? JSON.stringify(arg) : String(arg)).join(' '),
+					level: 'debug',
+					category: 'console',
+				});
+			}
+		} catch (e) {
+			// Silent fallback
+		}
+	};
+
+	return originalConsole;
+}
+
 // Helper to safely wrap with Sentry or fallback gracefully
 function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
 	return {
@@ -2420,6 +2709,14 @@ function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
 				return (provider as any).fetch(request, env, ctx);
 			}
 
+			// Wrap console methods to ensure all logs reach Sentry
+			wrapConsoleForSentry();
+
+			// Log startup with Sentry integration
+			console.log(`🚀 ASI MCP Server starting with Sentry integration enabled`);
+			console.log(`📊 Sentry Environment: ${env.SENTRY_ENV ?? env.PIPEDREAM_ENV}`);
+			console.log(`🔢 Release: ${env.CF_VERSION_METADATA?.id || 'dev'}`);
+
 			try {
 				// Try to wrap with Sentry
 				const sentryWrapped = Sentry.withSentry(
@@ -2431,10 +2728,25 @@ function createSentryWrappedHandler(provider: unknown): ExportedHandler<Env> {
 							release: versionId,
 							// capture headers/IP (you can set this false if you prefer)
 							sendDefaultPii: true,
-							// Logs: forwards console.* to Sentry Logs
+							// Enhanced logging configuration
 							enableLogs: true,
+							// Capture all log levels (debug, info, warn, error)
+							logLevels: ['debug', 'info', 'warn', 'error'],
+							// Send console.* calls immediately without batching delays
+							beforeBreadcrumb: (breadcrumb) => {
+								// Enhance console breadcrumbs with more context
+								if (breadcrumb.category === 'console') {
+									breadcrumb.level = breadcrumb.level || 'info';
+									breadcrumb.timestamp = Date.now() / 1000;
+								}
+								return breadcrumb;
+							},
 							// Tracing: 100% since volume is low (tune later)
 							tracesSampleRate: 1.0,
+							// Capture more breadcrumbs to provide better context
+							maxBreadcrumbs: 100,
+							// Enable debug mode for development
+							debug: env.SENTRY_ENV === 'development',
 							// Belt & suspenders token-scrubber
 							beforeSend: scrubEvent as any,
 						};
