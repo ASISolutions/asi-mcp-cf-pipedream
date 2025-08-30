@@ -63,13 +63,19 @@ npm run cf-typegen   # Generate Cloudflare Worker types
    - Cookie signing and security helpers
    - Upstream OAuth token exchange functions
 
+5. **URL Access Policy Engine** (`src/index.ts`):
+   - KV-backed policy system for fine-grained access control
+   - Multi-dimensional gating by user, app, method, host, and path
+   - Runtime policy updates without deployment
+   - Deny-overrides-allow security model with structured error responses
+
 ### MCP Tools Available
 
 1. **`auth_status`** - Check authentication status for connected apps
 2. **`search_apps`** - Search and discover available Pipedream Connect apps by name, slug, description, or domain. **Use this tool first** when a user wants to connect to a service (e.g., "connect me to xero" → search for "xero" → use returned `appSlug` with `auth_connect`)
 3. **`auth_connect`** - Generate Pipedream Connect Links for OAuth (requires exact `appSlug` from `search_apps`)
 4. **`auth_disconnect`** - Remove stored credentials for apps
-5. **`asi_magic_tool`** - Make authenticated requests through Pipedream proxy or direct system APIs. **CRITICAL: Always search and review SOPs using `search_sop_docs` before using this tool to ensure proper procedures are followed.**
+5. **`asi_magic_tool`** - Make authenticated requests through Pipedream proxy or direct system APIs. **CRITICAL: Always search and review SOPs using `search_sop_docs` before using this tool to ensure proper procedures are followed.** All requests are subject to the URL Access Policy system for security enforcement.
 6. **`send_feedback`** - Create GitHub issues for user feedback
 7. **`search_sop_docs`** - Search ASI Solutions SOP documentation on GitHub. **Use this tool before making any API requests with `asi_magic_tool` to understand proper procedures and workflows.**
 8. **`get_sop_process`** - Get specific SOP process by process code
@@ -101,6 +107,175 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 - Hard-coded configuration for apps with API key auth
 - Direct HTTP requests with credential injection
 - Currently supports Gamma app as example
+
+## URL Access Policy System
+
+The MCP server includes a comprehensive policy engine that controls API access based on user identity, application, HTTP method, host patterns, and path patterns. This provides fine-grained security controls over all API requests made through the `asi_magic_tool`.
+
+### Policy Architecture
+
+**Policy Storage:**
+- Policies are stored in the `USER_LINKS` KV namespace at key `mcp:policy:v1`
+- 60-second in-memory caching for performance
+- Runtime updates without requiring code deployment
+
+**Policy Evaluation:**
+- All `asi_magic_tool` requests are evaluated against the policy before execution
+- Three enforcement points: explicit system apps, preferred system apps, and Pipedream proxy requests
+- Deny rules always override allow rules (security-first approach)
+- Falls back to `defaultMode` if no explicit rules match
+
+**Policy Structure:**
+```typescript
+interface PolicyDocument {
+  version: string;                    // Policy version for tracking
+  defaultMode: "allow" | "deny";      // Global default behavior
+  appDefaults?: Record<string, "allow" | "deny">; // Per-app defaults
+  rules: PolicyRule[];               // Explicit allow/deny rules
+}
+
+interface PolicyRule {
+  id?: string;                       // Unique rule identifier
+  description?: string;              // Human-readable description
+  effect: "allow" | "deny";          // Rule action
+  subjects?: {                       // User/group targeting
+    users?: string[];                // Match by sub or email claims
+    groups?: string[];               // Match by Cloudflare Access groups
+  };
+  providers?: ("system" | "pipedream" | "*")[]; // Provider filtering
+  apps?: string[];                   // App slug filtering (supports wildcards)
+  methods?: ("GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "*")[]; 
+  hosts?: string[];                  // Host pattern matching (supports wildcards)
+  paths?: string[];                  // Path pattern matching (supports wildcards)
+}
+```
+
+### Current Policy Configuration
+
+The current policy follows these rules:
+
+**Default Behavior:**
+- `defaultMode: "allow"` - All requests allowed unless explicitly blocked
+
+**Restricted Apps (GET-only):**
+- **NetSuite**: Only GET requests permitted
+- **Marketo**: Only GET requests permitted
+- **Autotask**: Only GET requests permitted
+- **Cloudflare**: Only GET requests permitted
+
+**Xero Special Rules:**
+- **Contacts** (`/api.xro/2.0/contacts/**`): Full CRUD operations allowed
+- **Purchase Orders** (`/api.xro/2.0/purchaseorders/**`): Full CRUD operations allowed
+- **All other endpoints**: GET-only (POST/PUT/PATCH/DELETE blocked)
+
+### Policy Management Commands
+
+**View Current Policy:**
+```bash
+npx wrangler kv key get --binding=USER_LINKS "mcp:policy:v1" --preview false
+```
+
+**Update Policy:**
+```bash
+# 1. Edit your policy file (e.g., policy.json)
+# 2. Upload to KV storage
+npx wrangler kv key put --binding=USER_LINKS "mcp:policy:v1" --path=policy.json --preview false
+```
+
+**Example Policy Update:**
+```bash
+cat > new-policy.json << 'EOF'
+{
+  "version": "2025-08-30-v3",
+  "defaultMode": "allow",
+  "rules": [
+    {
+      "id": "block-delete-everywhere",
+      "description": "Never allow DELETE operations",
+      "effect": "deny",
+      "methods": ["DELETE"]
+    },
+    {
+      "id": "engineering-full-access",
+      "description": "Engineering group gets full access",
+      "effect": "allow",
+      "subjects": { "groups": ["Engineering"] },
+      "methods": ["*"]
+    }
+  ]
+}
+EOF
+
+npx wrangler kv key put --binding=USER_LINKS "mcp:policy:v1" --path=new-policy.json --preview false
+```
+
+### Wildcard Pattern Matching
+
+**Supported Wildcards:**
+- `*` - Matches any characters except `/` (single path segment)
+- `**` - Matches any characters including `/` (multiple path segments)
+- `?` - Matches any single character
+
+**Examples:**
+- `api.*.com` - Matches `api.example.com`, `api.test.com`
+- `/v1/**` - Matches `/v1/users`, `/v1/orders/123/items`
+- `/users/?/profile` - Matches `/users/1/profile`, `/users/a/profile`
+
+**Security Features:**
+- Input length limited to 200 characters
+- Character validation (alphanumeric + safe symbols only)
+- Non-greedy regex quantifiers prevent ReDoS attacks
+- Invalid patterns fail safely (deny access)
+
+### Policy Debugging
+
+**Blocked Request Response:**
+When a request is blocked by policy, the response includes detailed information:
+```json
+{
+  "error": "blocked_by_policy",
+  "message": "This request was blocked by policy.",
+  "reason": "Matched explicit deny rule",
+  "matched_rule": {
+    "id": "no-delete-everywhere",
+    "effect": "deny",
+    "methods": ["DELETE"]
+  },
+  "context": {
+    "provider": "pipedream",
+    "app": "hubspot",
+    "method": "DELETE",
+    "host": "api.hubapi.com", 
+    "path": "/crm/v3/objects/contacts/123"
+  }
+}
+```
+
+**Policy Evaluation Order:**
+1. **Subject matching**: Check if rule applies to user/groups
+2. **Context matching**: Check provider, app, method, host, path
+3. **Effect precedence**: Deny rules override allow rules
+4. **Fallback**: Use app default or global `defaultMode`
+
+### Best Practices
+
+**Policy Design:**
+- Start with `defaultMode: "deny"` for high-security environments
+- Use descriptive rule IDs and descriptions for maintainability
+- Test policy changes in development environment first
+- Version your policies for rollback capability
+
+**Security Considerations:**
+- Review policies regularly, especially after app additions
+- Monitor blocked requests through structured error responses  
+- Use group-based rules rather than individual user rules when possible
+- Keep wildcard patterns simple to avoid performance issues
+
+**Operational Guidelines:**
+- Policies take effect within 60 seconds (cache TTL)
+- No deployment required for policy updates
+- Changes are immediately visible in KV storage
+- Backup policies before making significant changes
 
 ## Configuration Files
 
@@ -162,6 +337,9 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 - Test OAuth flow with MCP Inspector or AI Playground
 - Verify KV storage operations work correctly
 - Test both Pipedream proxy and direct system app requests
+- **Test policy enforcement** by making requests that should be blocked/allowed
+- Monitor structured error responses for policy debugging
+- Verify policy cache invalidation (60-second TTL) after updates
 
 ## Key Files to Modify
 
@@ -176,3 +354,7 @@ npm run cf-typegen   # Generate Cloudflare Worker types
 2. **OAuth Redirect URIs** - Must be registered in both Cloudflare Access and MCP client
 3. **CORS Headers** - Handled automatically by the MCP SDK for SSE transport
 4. **Token Expiration** - Pipedream handles OAuth refresh; Access tokens are validated per request
+5. **Policy Not Taking Effect** - Wait 60 seconds for cache invalidation, verify KV key `mcp:policy:v1` exists
+6. **Unexpected Policy Blocks** - Check rule precedence (deny overrides allow), verify app slug matching
+7. **Wildcard Patterns Not Matching** - Ensure patterns use correct syntax (`*` vs `**`), check for typos in paths/hosts
+8. **Policy JSON Invalid** - Validate JSON syntax before uploading, check required fields (`version`, `defaultMode`, `rules`)
