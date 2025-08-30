@@ -268,7 +268,9 @@ export async function verifyToken(
 
 		return payload;
 	} catch (error) {
-		throw new Error(`Token verification failed: ${error}`);
+		// Sanitize error message to prevent information leakage
+		console.warn("JWT verification failed:", error);
+		throw new Error("Token verification failed");
 	}
 }
 

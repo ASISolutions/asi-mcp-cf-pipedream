@@ -99,7 +99,8 @@ async function fetchProxyEnabledApps(
 		return IN_MEMORY_APPS_INDEX.data;
 	}
 
-	// KV cache fallback
+	// KV cache fallback - intentionally global as app directory is the same for all tenants
+	// Tenant isolation happens at the connection level via external_user_id namespacing
 	const kvKey = "pd:apps:index";
 	try {
 		const cached = await env.USER_LINKS.get(kvKey);
@@ -122,7 +123,10 @@ async function fetchProxyEnabledApps(
 			"x-pd-environment": env.PIPEDREAM_ENV,
 		},
 	});
-	if (!res.ok) throw new Error(`Pipedream apps list error ${res.status}`);
+	if (!res.ok) {
+		console.warn(`Pipedream apps list error ${res.status}`);
+		throw new Error("Failed to fetch available apps");
+	}
 	const body = (await res.json()) as { data?: PdAppInfo[] };
 	const apps = (body.data || []).filter((a) => a.connect?.proxy_enabled);
 
@@ -216,7 +220,10 @@ async function searchAppsWithCache(
 						Authorization: `Bearer ${pdToken}`,
 					},
 				});
-				if (!res.ok) throw new Error(`Pipedream apps API error ${res.status}`);
+				if (!res.ok) {
+					console.warn(`Pipedream apps API error ${res.status}`);
+					throw new Error("Failed to fetch apps data");
+				}
 				const body = (await res.json()) as { data?: PdAppInfo[] };
 				const apps = body.data || [];
 
@@ -257,9 +264,8 @@ async function searchAppsWithCache(
 					);
 				} catch {}
 			} catch (error) {
-				throw new Error(
-					`Failed to fetch apps: ${error instanceof Error ? error.message : "Unknown error"}`,
-				);
+				console.warn("Failed to fetch apps:", error);
+				throw new Error("Service temporarily unavailable");
 			}
 		}
 	}
@@ -820,7 +826,10 @@ async function getPdAccessToken(env: Env): Promise<string> {
 			client_secret: env.PIPEDREAM_CLIENT_SECRET,
 		}),
 	});
-	if (!res.ok) throw new Error(`Pipedream token error ${res.status}`);
+	if (!res.ok) {
+		console.warn(`Pipedream token error ${res.status}`);
+		throw new Error("Authentication service unavailable");
+	}
 	const data = (await res.json()) as { access_token: string };
 	return data.access_token;
 }
@@ -1172,6 +1181,8 @@ async function loadPolicy(env: Env): Promise<PolicyDocument> {
 	}
 	let raw: string | null = null;
 	try {
+		// Global security policy - intentionally not tenant-scoped
+		// All tenants share the same security controls and access patterns
 		raw = await env.USER_LINKS.get("mcp:policy:v1");
 	} catch {}
 	let policy: PolicyDocument;
@@ -1289,7 +1300,7 @@ export class ASIConnectMCP extends McpAgent<Env, unknown, Props> {
 		const sub = this.props?.sub;
 		const tenant = (this.props as any)?.tenant_id || "default";
 		if (!sub) {
-			throw new Error("Missing user subject claim; user not authenticated.");
+			throw new Error("Authentication required");
 		}
 		return `${tenant}:${sub}`;
 	}
