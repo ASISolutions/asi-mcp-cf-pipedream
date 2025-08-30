@@ -8,6 +8,7 @@ import AccessDefaultHandler from "./access-handler";
 import type { Props } from "./workers-oauth-utils";
 import { SOPSearchService } from "./github-sop-search";
 import { DickerDataAuth } from "./dicker-data-auth";
+import { UserProvisioningService } from "./user-provisioning";
 
 // ---- Environment Types ----
 export interface Env {
@@ -49,6 +50,10 @@ export interface Env {
 
 	// System app API keys / secrets
 	GAMMA_API_KEY?: string;
+
+	// GitBook integration
+	GITBOOK_API_TOKEN?: string;
+	GITBOOK_ORGANIZATION_ID?: string;
 
 	// Dicker Data credentials
 	DICKER_DATA_ACCOUNT?: string;
@@ -3093,31 +3098,556 @@ const authFailureHtml = `<!DOCTYPE html>
 </body>
 </html>`;
 
+const signupHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Up - ASI Connect MCP</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+        
+        .signup-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 48px 40px;
+            max-width: 480px;
+            width: 90%;
+            text-align: center;
+        }
+        
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 8px;
+        }
+        
+        .subtitle {
+            color: #718096;
+            font-size: 16px;
+            margin-bottom: 40px;
+        }
+        
+        .hero-text {
+            font-size: 28px;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 16px;
+            line-height: 1.3;
+        }
+        
+        .description {
+            color: #4a5568;
+            font-size: 16px;
+            line-height: 1.5;
+            margin-bottom: 40px;
+        }
+        
+        .microsoft-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            background: #0078d4;
+            color: white;
+            text-decoration: none;
+            padding: 16px 32px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 16px;
+            transition: all 0.2s ease;
+            border: none;
+            cursor: pointer;
+            width: 100%;
+        }
+        
+        .microsoft-btn:hover {
+            background: #106ebe;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 120, 212, 0.3);
+        }
+        
+        .microsoft-icon {
+            width: 20px;
+            height: 20px;
+        }
+        
+        .features {
+            margin-top: 40px;
+            text-align: left;
+        }
+        
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+            color: #4a5568;
+            font-size: 14px;
+        }
+        
+        .checkmark {
+            width: 16px;
+            height: 16px;
+            color: #48bb78;
+            flex-shrink: 0;
+        }
+        
+        .trial-notice {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 24px;
+            color: #2d3748;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="signup-container">
+        <div class="logo">ASI Connect MCP</div>
+        <div class="subtitle">Secure API Integration Platform</div>
+        
+        <h1 class="hero-text">Get Started Today</h1>
+        <p class="description">
+            Connect your business tools securely with our enterprise-grade API integration platform. 
+            Start your free trial and experience seamless automation.
+        </p>
+        
+        <a href="/authorize?signup=true" class="microsoft-btn">
+            <svg class="microsoft-icon" viewBox="0 0 23 23" fill="currentColor">
+                <path d="M11 11h11v11H11z"/>
+                <path d="M0 11h11v11H0z"/>
+                <path d="M11 0h11v11H11z"/>
+                <path d="M0 0h11v11H0z"/>
+            </svg>
+            Sign up with Microsoft
+        </a>
+        
+        <div class="features">
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                30-day free trial with full access
+            </div>
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                Enterprise-grade security and compliance
+            </div>
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                Connect to 100+ business applications
+            </div>
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                Dedicated GitBook documentation space
+            </div>
+        </div>
+        
+        <div class="trial-notice">
+            <strong>Free Trial:</strong> Get full access for 30 days. No credit card required to start.
+        </div>
+    </div>
+</body>
+</html>`;
+
+const dashboardHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - ASI Connect MCP</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: #f7fafc;
+            color: #2d3748;
+            line-height: 1.6;
+        }
+        
+        .header {
+            background: white;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 16px 0;
+        }
+        
+        .header-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .logo {
+            font-size: 20px;
+            font-weight: 700;
+            color: #2d3748;
+        }
+        
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            color: #718096;
+            font-size: 14px;
+        }
+        
+        .main-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 32px 24px;
+        }
+        
+        .welcome-section {
+            background: white;
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 32px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        .welcome-title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 8px;
+        }
+        
+        .welcome-subtitle {
+            color: #718096;
+            font-size: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .status-card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        
+        .status-provisioning .status-icon {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 16px;
+            border: 3px solid #3182ce;
+            border-top: 3px solid transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        .status-complete .status-icon {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 16px;
+            background: #48bb78;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .status-error .status-icon {
+            width: 48px;
+            height: 48px;
+            margin: 0 auto 16px;
+            background: #e53e3e;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .checkmark {
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        .error-icon {
+            color: white;
+            font-size: 24px;
+            font-weight: bold;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .status-title {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        .status-description {
+            color: #718096;
+            margin-bottom: 24px;
+        }
+        
+        .gitbook-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: #3182ce;
+            color: white;
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+        
+        .gitbook-link:hover {
+            background: #2c5aa0;
+            transform: translateY(-1px);
+        }
+        
+        .trial-info {
+            background: #ebf8ff;
+            border: 1px solid #bee3f8;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 24px;
+        }
+        
+        .trial-info h4 {
+            color: #2c5aa0;
+            margin-bottom: 4px;
+        }
+        
+        .trial-info p {
+            color: #2a69ac;
+            font-size: 14px;
+        }
+        
+        .retry-btn {
+            display: inline-block;
+            background: #e53e3e;
+            color: white;
+            text-decoration: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-weight: 600;
+            margin-top: 16px;
+            transition: background 0.2s ease;
+        }
+        
+        .retry-btn:hover {
+            background: #c53030;
+        }
+        
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-container">
+            <div class="logo">ASI Connect MCP</div>
+            <div class="user-info">
+                <span id="user-email">Loading...</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <div class="welcome-section">
+            <h1 class="welcome-title">Welcome to ASI Connect MCP</h1>
+            <p class="welcome-subtitle">Your secure API integration platform is being set up.</p>
+            
+            <div id="status-provisioning" class="status-card status-provisioning">
+                <div class="status-icon"></div>
+                <h3 class="status-title">Setting Up Your Account</h3>
+                <p class="status-description">
+                    We're provisioning your GitBook documentation space and configuring your account. 
+                    This usually takes about 30 seconds.
+                </p>
+                <div class="trial-info">
+                    <h4>30-Day Free Trial</h4>
+                    <p>Your trial has started! You have full access to all features during your trial period.</p>
+                </div>
+            </div>
+            
+            <div id="status-complete" class="status-card status-complete hidden">
+                <div class="status-icon">
+                    <div class="checkmark">✓</div>
+                </div>
+                <h3 class="status-title">Account Ready!</h3>
+                <p class="status-description">
+                    Your ASI Connect MCP account has been successfully set up. 
+                    Your documentation space is ready and you can start integrating with your business tools.
+                </p>
+                <a href="#" id="gitbook-link" class="gitbook-link">
+                    <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M10.802 17.77a.703.703 0 11-.002 1.406.703.703 0 01.002-1.406m11.024-4.347a.703.703 0 11.001-1.406.703.703 0 01-.001 1.406m0-2.876a2.176 2.176 0 00-2.174 2.174c0 .233.039.465.115.691l-7.181 3.823a2.165 2.165 0 00-1.784-.937c-.829 0-1.584.475-1.95 1.216l-6.451-3.402c-.682-.358-1.192-1.48-1.192-2.628 0-1.684 1.034-2.986 2.717-3.274.423-.072.853-.055 1.279.055.849.219 1.579.742 2.064 1.456.243.357.39.758.436 1.18.035.336.004.672-.092.992-.204.68-.638 1.29-1.22 1.718a2.175 2.175 0 002.174 2.174z"/>
+                    </svg>
+                    Open Getting Started Guide
+                </a>
+                <div class="trial-info">
+                    <h4 id="trial-days">30 Days Remaining</h4>
+                    <p>Your free trial is active. Enjoy full access to all features!</p>
+                </div>
+            </div>
+            
+            <div id="status-error" class="status-card status-error hidden">
+                <div class="status-icon">
+                    <div class="error-icon">!</div>
+                </div>
+                <h3 class="status-title">Setup Error</h3>
+                <p class="status-description">
+                    There was an issue setting up your account. Please try again or contact support if the problem persists.
+                </p>
+                <a href="/authorize?signup=true" class="retry-btn">Retry Setup</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Check provisioning status and update UI
+        async function checkStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                // Update user email
+                document.getElementById('user-email').textContent = data.email || 'User';
+                
+                // Update status based on response
+                if (data.status === 'complete') {
+                    showCompleteStatus(data);
+                } else if (data.status === 'error') {
+                    showErrorStatus();
+                } else {
+                    // Keep showing provisioning status
+                    setTimeout(checkStatus, 3000); // Check again in 3 seconds
+                }
+            } catch (error) {
+                console.error('Status check failed:', error);
+                // Keep trying
+                setTimeout(checkStatus, 5000); // Try again in 5 seconds
+            }
+        }
+        
+        function showCompleteStatus(data) {
+            document.getElementById('status-provisioning').classList.add('hidden');
+            document.getElementById('status-error').classList.add('hidden');
+            document.getElementById('status-complete').classList.remove('hidden');
+            
+            // Update GitBook link
+            if (data.gitbookUrl) {
+                document.getElementById('gitbook-link').href = data.gitbookUrl;
+            }
+            
+            // Update trial info
+            if (data.trialDaysRemaining !== undefined) {
+                document.getElementById('trial-days').textContent = 
+                    data.trialDaysRemaining + ' Days Remaining';
+            }
+        }
+        
+        function showErrorStatus() {
+            document.getElementById('status-provisioning').classList.add('hidden');
+            document.getElementById('status-complete').classList.add('hidden');
+            document.getElementById('status-error').classList.remove('hidden');
+        }
+        
+        // Start checking status when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            // Check status immediately, then every 3 seconds
+            checkStatus();
+        });
+    </script>
+</body>
+</html>`;
+
 // Create the OAuth Provider instance
 const provider = new OAuthProvider({
 	// Protect both the HTTP and SSE MCP endpoints
 	apiHandlers: {
 		"/mcp": ASIConnectMCP.serve("/mcp") as any,
 		"/sse": ASIConnectMCP.serveSSE("/sse") as any,
-		// Add auth page handlers as ExportedHandler objects
-		"/auth/success": {
-			fetch: async () => {
-				return new Response(authSuccessHtml, {
+		// Only protected routes should be in apiHandlers
+		"/dashboard": {
+			fetch: async (request, env) => {
+				return new Response(dashboardHtml, {
 					headers: {
 						"Content-Type": "text/html",
-						"Cache-Control": "public, max-age=3600",
+						"Cache-Control": "no-cache",
 					},
 				});
 			},
 		},
-		"/auth/failure": {
-			fetch: async () => {
-				return new Response(authFailureHtml, {
-					headers: {
-						"Content-Type": "text/html",
-						"Cache-Control": "public, max-age=3600",
-					},
-				});
+		"/api/status": {
+			fetch: async (request, env) => {
+				try {
+					// Extract user info from OAuth provider context
+					const authHeader = request.headers.get("Authorization");
+					if (!authHeader) {
+						return new Response(JSON.stringify({ error: "Unauthorized" }), {
+							status: 401,
+							headers: { "Content-Type": "application/json" },
+						});
+					}
+
+					// Parse the token to get user info (simplified for now)
+					// In a real implementation, you'd validate the token properly
+					const url = new URL(request.url);
+					const provisioning = new UserProvisioningService(env as Env);
+					
+					// For now, return a mock response - this would be replaced with actual user data
+					// extracted from the authenticated context
+					const mockResponse = {
+						email: "user@example.com",
+						status: "provisioning", // or "complete" or "error"
+						gitbookUrl: null,
+						trialDaysRemaining: 30
+					};
+
+					return new Response(JSON.stringify(mockResponse), {
+						headers: { "Content-Type": "application/json" },
+					});
+				} catch (error) {
+					return new Response(JSON.stringify({ error: "Internal server error" }), {
+						status: 500,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
 			},
 		},
 	},
