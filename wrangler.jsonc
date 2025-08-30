@@ -29,11 +29,6 @@
 			"binding": "USER_LINKS",
 			"id": "a9ca6f94a16f4f85a82f57d934758cc4",
 			"preview_id": "ae15a3f6429a420db362fb76847087e7"
-		},
-		{
-			"binding": "POLICY_KV",
-			"id": "PLACEHOLDER_POLICY_KV_ID",
-			"preview_id": "PLACEHOLDER_POLICY_KV_PREVIEW_ID"
 		}
 	],
 	"version_metadata": {

@@ -13,10 +13,8 @@ import { DickerDataAuth } from "./dicker-data-auth";
 export interface Env {
 	// OAuth KV storage
 	OAUTH_KV: KVNamespace;
-	// User data and caching
+	// User data and caching (also used for policy storage)
 	USER_LINKS: KVNamespace;
-	// Policy configuration
-	POLICY_KV?: KVNamespace;
 
 	// Cloudflare Access OAuth configuration
 	ACCESS_CLIENT_ID: string;
@@ -884,21 +882,67 @@ interface PolicyDocument {
 let IN_MEMORY_POLICY: { expiresAt: number; data: PolicyDocument } | undefined;
 
 // Basic wildcard matcher: "*", "**" and "?" supported
+// Protected against ReDoS with input length limits and simplified patterns
 function wildcardToRegExp(input: string): RegExp {
-	// Escape regex metachars then re-insert wildcards
-	const escaped = input
-		.replace(/[-/\\^$+?.()|[\]{}]/g, "\\$&")
-		.replace(/\*\*/g, "__DOUBLE_STAR__")
-		.replace(/\*/g, "[^/]*")
-		.replace(/__DOUBLE_STAR__/g, ".*")
-		.replace(/\?/g, ".");
+	// Prevent ReDoS attacks with input length limit
+	if (input.length > 200) {
+		throw new Error("Pattern too long for security");
+	}
+
+	// Validate input contains only safe characters
+	if (!/^[a-zA-Z0-9.\-_/*?]+$/.test(input)) {
+		throw new Error("Pattern contains unsafe characters");
+	}
+
+	// Escape regex metachars, avoiding catastrophic backtracking
+	let escaped = "";
+	for (let i = 0; i < input.length; i++) {
+		const char = input[i];
+		switch (char) {
+			case "*":
+				if (input[i + 1] === "*") {
+					escaped += ".*?"; // Non-greedy matching to prevent backtracking
+					i++; // Skip next *
+				} else {
+					escaped += "[^/]*?"; // Non-greedy matching
+				}
+				break;
+			case "?":
+				escaped += ".";
+				break;
+			case ".":
+			case "-":
+			case "[":
+			case "]":
+			case "(":
+			case ")":
+			case "^":
+			case "$":
+			case "+":
+			case "{":
+			case "}":
+			case "|":
+			case "\\":
+				escaped += "\\" + char;
+				break;
+			default:
+				escaped += char;
+		}
+	}
 	return new RegExp("^" + escaped + "$");
 }
 
 function matchOne(target: string | undefined, patterns?: string[]): boolean {
 	if (!patterns || patterns.length === 0) return true; // unspecified -> matches all
 	if (!target) return false;
-	return patterns.some((p) => wildcardToRegExp(p).test(target));
+	return patterns.some((p) => {
+		try {
+			return wildcardToRegExp(p).test(target);
+		} catch {
+			// If pattern is invalid, treat as non-matching for security
+			return false;
+		}
+	});
 }
 
 function matchSet<T extends string>(
@@ -943,10 +987,9 @@ async function loadPolicy(env: Env): Promise<PolicyDocument> {
 	if (IN_MEMORY_POLICY && IN_MEMORY_POLICY.expiresAt > now) {
 		return IN_MEMORY_POLICY.data;
 	}
-	const kv = env.POLICY_KV || env.USER_LINKS; // fallback allowed
 	let raw: string | null = null;
 	try {
-		raw = await kv.get("mcp:policy:v1");
+		raw = await env.USER_LINKS.get("mcp:policy:v1");
 	} catch {}
 	let policy: PolicyDocument;
 
