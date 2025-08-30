@@ -8,6 +8,7 @@ import AccessDefaultHandler from "./access-handler";
 import type { Props } from "./workers-oauth-utils";
 import { SOPSearchService } from "./github-sop-search";
 import { DickerDataAuth } from "./dicker-data-auth";
+import { GitHubDocService, type UpdateDocParams } from "./github-doc-update";
 
 // ---- Environment Types ----
 export interface Env {
@@ -38,7 +39,7 @@ export interface Env {
 	MCP_OBJECT: DurableObjectNamespace;
 
 	// GitHub Issues configuration
-	GITHUB_TOKEN: string; // GitHub Personal Access Token with repo:issues
+	GITHUB_TOKEN: string; // GitHub Personal Access Token with repo:issues and content write permissions
 	GITHUB_REPO: string; // "owner/repo"
 	GITHUB_API_BASE?: string; // Optional, for GitHub Enterprise (e.g., https://github.myco.com/api/v3)
 
@@ -1054,6 +1055,7 @@ ${
 - \`auth_connect\` - Generate connection links for apps
 - \`auth_status\` - Check current connection status
 - \`asi_magic_tool\` - Make authenticated API requests
+- \`update_docs\` - Create or update documentation files with pull request creation
 - \`send_feedback\` - Report issues or request new features
 `;
 
@@ -1072,7 +1074,7 @@ ${
 		);
 
 		// -------- assistant_instructions resource --------
-		this.server.resource("assistant_instructions", async () => {
+		this.server.resource("assistant_instructions", "Assistant instructions for AI", async () => {
 			const external_user_id = this.getExternalUserId();
 			const pdToken = await getPdAccessToken(this.env);
 
@@ -1127,6 +1129,7 @@ ${
 - \`auth_connect\` - Generate connection links for apps
 - \`auth_status\` - Check current connection status
 - \`asi_magic_tool\` - Make authenticated API requests
+- \`update_docs\` - Create or update documentation files with pull request creation
 - \`send_feedback\` - Report issues or request new features
 `;
 
@@ -1388,7 +1391,7 @@ ${
 					if (!res.ok)
 						throw new Error(`Pipedream apps search error ${res.status}`);
 					const body = (await res.json()) as { data?: PdAppInfo[] };
-					let allApps = body.data || [];
+					const allApps = body.data || [];
 
 					// Apply additional client-side filters for parameters not supported by API
 					let filteredApps = allApps;
@@ -2233,6 +2236,154 @@ ${
 										error: "process_fetch_failed",
 										message: `Failed to fetch process ${process_code}: ${error instanceof Error ? error.message : "Unknown error"}`,
 										process_code,
+									}),
+								},
+							],
+						};
+					}
+				},
+			),
+		);
+
+		// -------- update_docs --------
+		this.server.tool(
+			"update_docs",
+			{
+				action: z.enum(["create", "update"]).describe("Whether to create a new file or update an existing one"),
+				file_path: z.string().min(1).max(200).describe("Path relative to repo root, e.g. 'processes/sales/new-sop.md'"),
+				content: z.string().min(1).describe("Full file content (markdown with optional frontmatter)"),
+				commit_message: z.string().min(5).max(100).describe("Git commit message"),
+				pr_title: z.string().optional().describe("Pull request title (if provided, creates a PR)"),
+				pr_description: z.string().optional().describe("Pull request description"),
+				branch_name: z.string().optional().describe("Custom branch name (auto-generated if not provided)"),
+				base_branch: z.string().optional().default("main").describe("Base branch to create PR against"),
+			},
+			this.withSentryInstrumentation(
+				"update_docs",
+				() => undefined, // no single app
+				async ({
+					action,
+					file_path,
+					content,
+					commit_message,
+					pr_title,
+					pr_description,
+					branch_name,
+					base_branch,
+				}: {
+					action: "create" | "update";
+					file_path: string;
+					content: string;
+					commit_message: string;
+					pr_title?: string;
+					pr_description?: string;
+					branch_name?: string;
+					base_branch?: string;
+				}) => {
+					console.log(`📝 Documentation update called for: ${file_path}`);
+
+					const token = this.env.GITHUB_TOKEN;
+					if (!token) {
+						console.error("❌ GitHub token missing for documentation update");
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "github_not_configured",
+										message: "GitHub token not configured for documentation updates",
+									}),
+								},
+							],
+						};
+					}
+
+					const sopOwner = this.env.GITHUB_SOP_OWNER || "ASISolutions";
+					const sopRepo = this.env.GITHUB_SOP_REPO || "docs";
+					const apiBase = this.env.GITHUB_API_BASE || "https://api.github.com";
+
+					console.log(`🔧 Using repository: ${sopOwner}/${sopRepo} (API: ${apiBase})`);
+
+					try {
+						const docService = new GitHubDocService(
+							token,
+							sopOwner,
+							sopRepo,
+							apiBase,
+						);
+
+						const updateParams: UpdateDocParams = {
+							action,
+							file_path,
+							content,
+							commit_message,
+							pr_title,
+							pr_description,
+							branch_name,
+							base_branch,
+						};
+
+						console.log(`🚀 Starting ${action} operation for ${file_path}...`);
+						const result = await docService.updateDocument(updateParams);
+
+						if (!result.success) {
+							console.error(`❌ Documentation update failed: ${result.error}`);
+							return {
+								content: [
+									{
+										type: "text",
+										text: JSON.stringify({
+											error: "update_failed",
+											message: `Failed to ${action} documentation: ${result.error}`,
+											file_path,
+										}),
+									},
+								],
+							};
+						}
+
+						console.log(`✅ Documentation ${action} successful`);
+						
+						// Format response with all relevant information
+						const response: any = {
+							success: true,
+							action,
+							file_path,
+							branch: result.branch,
+							commit_sha: result.commit_sha,
+							repository: `${sopOwner}/${sopRepo}`,
+						};
+
+						if (result.pr_url) {
+							response.pull_request = {
+								url: result.pr_url,
+								number: result.pr_number,
+								title: pr_title,
+							};
+							response.message = `Documentation ${action}d and pull request created successfully. Review at: ${result.pr_url}`;
+						} else {
+							response.message = `Documentation ${action}d successfully on branch: ${result.branch}`;
+						}
+
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify(response),
+								},
+							],
+						};
+					} catch (error) {
+						console.error(`💥 Documentation update error:`, error);
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify({
+										error: "update_failed",
+										message: `Documentation update failed: ${error instanceof Error ? error.message : "Unknown error"}`,
+										file_path,
+										action,
 									}),
 								},
 							],
