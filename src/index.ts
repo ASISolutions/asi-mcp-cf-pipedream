@@ -9,6 +9,178 @@ import type { Props } from "./workers-oauth-utils";
 import { SOPSearchService } from "./github-sop-search";
 import { DickerDataAuth } from "./dicker-data-auth";
 
+// ---- Static HTML Content ----
+const SUCCESS_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connection Successful</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            max-width: 400px;
+            margin: 20px;
+        }
+        .success-icon {
+            color: #10b981;
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+        h1 {
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+            font-size: 1.75rem;
+        }
+        p {
+            color: #6b7280;
+            margin-bottom: 2rem;
+            line-height: 1.5;
+        }
+        .close-btn {
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .close-btn:hover {
+            background: #059669;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="success-icon">✓</div>
+        <h1>Connection Successful!</h1>
+        <p>Your account has been successfully connected. You can now close this window and return to your application.</p>
+        <button class="close-btn" onclick="window.close()">Close Window</button>
+    </div>
+    
+    <script>
+        // Auto-close after 3 seconds if window.close() doesn't work
+        setTimeout(() => {
+            try {
+                window.close();
+            } catch (e) {
+                // If close fails, show a message
+                document.querySelector('p').innerHTML = 'Connection successful! Please close this tab manually.';
+            }
+        }, 3000);
+    </script>
+</body>
+</html>`;
+
+const FAILURE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Connection Failed</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            text-align: center;
+            max-width: 400px;
+            margin: 20px;
+        }
+        .error-icon {
+            color: #ef4444;
+            font-size: 4rem;
+            margin-bottom: 1rem;
+        }
+        h1 {
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+            font-size: 1.75rem;
+        }
+        p {
+            color: #6b7280;
+            margin-bottom: 2rem;
+            line-height: 1.5;
+        }
+        .close-btn {
+            background: #ef4444;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            margin-right: 10px;
+        }
+        .close-btn:hover {
+            background: #dc2626;
+        }
+        .retry-btn {
+            background: #6b7280;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        .retry-btn:hover {
+            background: #4b5563;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="error-icon">✗</div>
+        <h1>Connection Failed</h1>
+        <p>There was a problem connecting your account. Please try again or contact support if the issue persists.</p>
+        <button class="retry-btn" onclick="history.back()">Try Again</button>
+        <button class="close-btn" onclick="window.close()">Close Window</button>
+    </div>
+    
+    <script>
+        // Auto-close after 5 seconds if window.close() doesn't work (longer delay for error case)
+        setTimeout(() => {
+            try {
+                window.close();
+            } catch (e) {
+                // If close fails, show a message
+                document.querySelector('p').innerHTML = 'Connection failed. Please close this tab manually and try again.';
+            }
+        }, 5000);
+    </script>
+</body>
+</html>`;
+
 // ---- Environment Types ----
 export interface Env {
 	// OAuth KV storage
@@ -2168,12 +2340,39 @@ function scrubEvent(event: Sentry.Event): Sentry.Event {
 	return event;
 }
 
+// Static page handlers for auth redirects
+function createSuccessHandler(): (request: Request, env: Env) => Response {
+	return () => {
+		return new Response(SUCCESS_HTML, {
+			status: 200,
+			headers: {
+				"Content-Type": "text/html",
+				"Cache-Control": "no-cache, no-store, must-revalidate",
+			},
+		});
+	};
+}
+
+function createFailureHandler(): (request: Request, env: Env) => Response {
+	return () => {
+		return new Response(FAILURE_HTML, {
+			status: 200,
+			headers: {
+				"Content-Type": "text/html",
+				"Cache-Control": "no-cache, no-store, must-revalidate",
+			},
+		});
+	};
+}
+
 // Create the OAuth Provider instance
 const provider = new OAuthProvider({
 	// Protect both the HTTP and SSE MCP endpoints
 	apiHandlers: {
 		"/mcp": ASIConnectMCP.serve("/mcp") as any,
 		"/sse": ASIConnectMCP.serveSSE("/sse") as any,
+		"/auth/success": createSuccessHandler() as any,
+		"/auth/failure": createFailureHandler() as any,
 	},
 	// The UI / SSO flow is handled by Access in our default handler
 	defaultHandler: AccessDefaultHandler,
