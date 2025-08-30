@@ -1254,7 +1254,7 @@ ${
 			return {
 				contents: [
 					{
-						uri: "file://assistant_instructions.md",
+						uri: "mcp://assistant_instructions/instructions.md",
 						mimeType: "text/markdown",
 						text: instructions.trim(),
 					},
