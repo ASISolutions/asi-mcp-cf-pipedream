@@ -2377,22 +2377,26 @@ const provider = new OAuthProvider({
 	apiHandlers: {
 		"/mcp": ASIConnectMCP.serve("/mcp") as any,
 		"/sse": ASIConnectMCP.serveSSE("/sse") as any,
-		// Add auth page handlers
-		"/auth/success": async () => {
-			return new Response(authSuccessHtml, {
-				headers: {
-					"Content-Type": "text/html",
-					"Cache-Control": "public, max-age=3600",
-				},
-			});
+		// Add auth page handlers as ExportedHandler objects
+		"/auth/success": {
+			fetch: async () => {
+				return new Response(authSuccessHtml, {
+					headers: {
+						"Content-Type": "text/html",
+						"Cache-Control": "public, max-age=3600",
+					},
+				});
+			}
 		},
-		"/auth/failure": async () => {
-			return new Response(authFailureHtml, {
-				headers: {
-					"Content-Type": "text/html",
-					"Cache-Control": "public, max-age=3600",
-				},
-			});
+		"/auth/failure": {
+			fetch: async () => {
+				return new Response(authFailureHtml, {
+					headers: {
+						"Content-Type": "text/html",
+						"Cache-Control": "public, max-age=3600",
+					},
+				});
+			}
 		},
 	},
 	// The UI / SSO flow is handled by Access in our default handler
