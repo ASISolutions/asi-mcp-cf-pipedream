@@ -15,10 +15,13 @@ export interface DickerDataSession {
 
 export class DickerDataAuth {
 	private env: Env;
-	private sessionKey = "dicker-data:session";
+	private sessionKey: string;
 
-	constructor(env: Env) {
+	constructor(env: Env, tenant?: string, user?: string) {
 		this.env = env;
+		const tenantId = tenant || "default";
+		const userId = user || "unknown";
+		this.sessionKey = `tenant:${tenantId}:user:${userId}:dicker-data:session`;
 	}
 
 	private getCredentials(): DickerDataCredentials {
