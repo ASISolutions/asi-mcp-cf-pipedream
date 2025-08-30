@@ -39,9 +39,18 @@ function deriveTenantId(requestUrl: string, claims: any): string {
 		const parts = hostname.split(".");
 
 		if (parts.length >= 3) {
-			// For multi-subdomain like "acme.mcp.example.com"
 			const subdomain = parts[0];
 			if (subdomain.length >= 3 && subdomain !== "www") {
+				// Handle Cloudflare Workers URLs (*.*.workers.dev)
+				if (
+					parts[parts.length - 2] === "workers" &&
+					parts[parts.length - 1] === "dev"
+				) {
+					// For "asi-mcp.asi-cloud.workers.dev" → just use "asi-mcp"
+					return validateTenantId(subdomain);
+				}
+
+				// For custom domains like "acme.mcp.example.com"
 				// Include second level for uniqueness: "acme-mcp"
 				const secondLevel = parts[1];
 				if (secondLevel && secondLevel !== "mcp") {
