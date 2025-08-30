@@ -2267,12 +2267,133 @@ function scrubEvent(event: Sentry.Event): Sentry.Event {
 	return event;
 }
 
+// HTML content for auth pages
+const authSuccessHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OAuth Success</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f5f5f5;
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            max-width: 400px;
+        }
+        .success-icon {
+            color: #22c55e;
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        h1 {
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+        }
+        p {
+            color: #6b7280;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="success-icon">✓</div>
+        <h1>Authentication Successful</h1>
+        <p>You have successfully connected your account. You can now close this window and return to your application.</p>
+    </div>
+</body>
+</html>`;
+
+const authFailureHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OAuth Failed</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background-color: #f5f5f5;
+        }
+        .container {
+            text-align: center;
+            background: white;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            max-width: 400px;
+        }
+        .error-icon {
+            color: #ef4444;
+            font-size: 3rem;
+            margin-bottom: 1rem;
+        }
+        h1 {
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+        }
+        p {
+            color: #6b7280;
+            line-height: 1.5;
+        }
+        .retry-text {
+            margin-top: 1rem;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="error-icon">✗</div>
+        <h1>Authentication Failed</h1>
+        <p>There was an error connecting your account. Please try again or contact support if the problem persists.</p>
+        <p class="retry-text">You can close this window and retry the authentication process.</p>
+    </div>
+</body>
+</html>`;
+
 // Create the OAuth Provider instance
 const provider = new OAuthProvider({
 	// Protect both the HTTP and SSE MCP endpoints
 	apiHandlers: {
 		"/mcp": ASIConnectMCP.serve("/mcp") as any,
 		"/sse": ASIConnectMCP.serveSSE("/sse") as any,
+		// Add auth page handlers
+		"/auth/success": async () => {
+			return new Response(authSuccessHtml, {
+				headers: {
+					"Content-Type": "text/html",
+					"Cache-Control": "public, max-age=3600",
+				},
+			});
+		},
+		"/auth/failure": async () => {
+			return new Response(authFailureHtml, {
+				headers: {
+					"Content-Type": "text/html",
+					"Cache-Control": "public, max-age=3600",
+				},
+			});
+		},
 	},
 	// The UI / SSO flow is handled by Access in our default handler
 	defaultHandler: AccessDefaultHandler,
