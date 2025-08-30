@@ -72,7 +72,7 @@
     <div class="container">
         <div class="error-icon">✗</div>
         <h1>Connection Failed</h1>
-        <p>There was a problem connecting your account. Please try again or contact support if the issue persists.</p>
+        <p id="message">There was a problem connecting your account. Please try again or contact support if the issue persists.</p>
         <button class="retry-btn" onclick="history.back()">Try Again</button>
         <button class="close-btn" onclick="window.close()">Close Window</button>
     </div>
@@ -83,8 +83,11 @@
             try {
                 window.close();
             } catch (e) {
-                // If close fails, show a message
-                document.querySelector('p').innerHTML = 'Connection failed. Please close this tab manually and try again.';
+                // If close fails, show a message safely using textContent
+                const messageEl = document.getElementById('message');
+                if (messageEl) {
+                    messageEl.textContent = 'Connection failed. Please close this tab manually and try again.';
+                }
             }
         }, 5000);
     </script>

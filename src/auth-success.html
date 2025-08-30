@@ -58,7 +58,7 @@
     <div class="container">
         <div class="success-icon">✓</div>
         <h1>Connection Successful!</h1>
-        <p>Your account has been successfully connected. You can now close this window and return to your application.</p>
+        <p id="message">Your account has been successfully connected. You can now close this window and return to your application.</p>
         <button class="close-btn" onclick="window.close()">Close Window</button>
     </div>
     
@@ -68,8 +68,11 @@
             try {
                 window.close();
             } catch (e) {
-                // If close fails, show a message
-                document.querySelector('p').innerHTML = 'Connection successful! Please close this tab manually.';
+                // If close fails, show a message safely using textContent
+                const messageEl = document.getElementById('message');
+                if (messageEl) {
+                    messageEl.textContent = 'Connection successful! Please close this tab manually.';
+                }
             }
         }, 3000);
     </script>
