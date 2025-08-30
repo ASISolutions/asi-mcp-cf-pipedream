@@ -4,6 +4,7 @@ import {
 	verifyToken,
 	fetchUpstreamAuthToken,
 } from "./workers-oauth-utils";
+import { UserProvisioningService } from "./user-provisioning";
 
 /**
  * Validates and sanitizes tenant ID to prevent collisions and injection
@@ -181,6 +182,60 @@ export default {
 
 			// Derive tenant_id from hostname or Access claims with collision prevention
 			const tenant_id = deriveTenantId(request.url, claims);
+			
+			// Check if this is a signup flow
+			const isSignup = url.searchParams.get("signup") === "true" || oauthReq.client_id?.includes("signup");
+			
+			const userEmail = claims.email || "";
+			const userDomain = userEmail.includes("@") ? userEmail.split("@")[1] : "";
+			
+			// Initialize provisioning service
+			const provisioning = new UserProvisioningService(env);
+			
+			// Check if user already exists
+			const userExists = await provisioning.userExists(tenant_id, userId);
+			
+			if (!userExists) {
+				// New user signup flow
+				if (!isSignup) {
+					// User doesn't exist but this isn't a signup request - redirect to signup
+					const signupUrl = new URL("/signup", url.origin);
+					return Response.redirect(signupUrl.toString(), 302);
+				}
+				
+				// Check domain blocking
+				if (userDomain) {
+					const domainCheck = await provisioning.isDomainBlocked(userDomain);
+					if (domainCheck.blocked) {
+						// Return error page for blocked domain
+						return new Response(`
+							<!DOCTYPE html>
+							<html><head><title>Domain Already Registered</title></head>
+							<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px;">
+								<h1 style="color: #e53e3e;">Domain Already Registered</h1>
+								<p>${domainCheck.reason}</p>
+								<p>If you believe this is an error, please contact support.</p>
+								<a href="/signup" style="color: #3182ce;">← Back to Sign Up</a>
+							</body></html>
+						`, {
+							status: 403,
+							headers: { "Content-Type": "text/html" }
+						});
+					}
+				}
+				
+				// Create new user and start provisioning
+				await provisioning.createUser({
+					tenant: tenant_id,
+					sub: userId,
+					email: userEmail,
+					name: claims.name || claims.common_name || "",
+					domain: userDomain
+				});
+				
+				// Start async provisioning (don't await - let it run in background)
+				ctx.waitUntil(provisioning.completeProvisioning(tenant_id, userId));
+			}
 
 			const props = {
 				sub: userId,
@@ -203,6 +258,12 @@ export default {
 
 			// Cleanup
 			await env.OAUTH_KV.delete(`oauthreq:${state}`);
+
+			// If this was a new user signup, redirect to dashboard instead of original redirect
+			if (!userExists && isSignup) {
+				const dashboardUrl = new URL("/dashboard", url.origin);
+				return Response.redirect(dashboardUrl.toString(), 302);
+			}
 
 			return Response.redirect(redirectTo, 302);
 		}

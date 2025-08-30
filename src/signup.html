@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign Up - ASI Connect MCP</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+        
+        .signup-container {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            padding: 48px 40px;
+            max-width: 480px;
+            width: 90%;
+            text-align: center;
+        }
+        
+        .logo {
+            font-size: 24px;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 8px;
+        }
+        
+        .subtitle {
+            color: #718096;
+            font-size: 16px;
+            margin-bottom: 40px;
+        }
+        
+        .hero-text {
+            font-size: 28px;
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 16px;
+            line-height: 1.3;
+        }
+        
+        .description {
+            color: #4a5568;
+            font-size: 16px;
+            line-height: 1.5;
+            margin-bottom: 40px;
+        }
+        
+        .microsoft-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+            background: #0078d4;
+            color: white;
+            text-decoration: none;
+            padding: 16px 32px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 16px;
+            transition: all 0.2s ease;
+            border: none;
+            cursor: pointer;
+            width: 100%;
+        }
+        
+        .microsoft-btn:hover {
+            background: #106ebe;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 120, 212, 0.3);
+        }
+        
+        .microsoft-icon {
+            width: 20px;
+            height: 20px;
+        }
+        
+        .features {
+            margin-top: 40px;
+            text-align: left;
+        }
+        
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+            color: #4a5568;
+            font-size: 14px;
+        }
+        
+        .checkmark {
+            width: 16px;
+            height: 16px;
+            color: #48bb78;
+            flex-shrink: 0;
+        }
+        
+        .trial-notice {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 24px;
+            color: #2d3748;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="signup-container">
+        <div class="logo">ASI Connect MCP</div>
+        <div class="subtitle">Secure API Integration Platform</div>
+        
+        <h1 class="hero-text">Get Started Today</h1>
+        <p class="description">
+            Connect your business tools securely with our enterprise-grade API integration platform. 
+            Start your free trial and experience seamless automation.
+        </p>
+        
+        <a href="/authorize?signup=true" class="microsoft-btn">
+            <svg class="microsoft-icon" viewBox="0 0 23 23" fill="currentColor">
+                <path d="M11 11h11v11H11z"/>
+                <path d="M0 11h11v11H0z"/>
+                <path d="M11 0h11v11H11z"/>
+                <path d="M0 0h11v11H0z"/>
+            </svg>
+            Sign up with Microsoft
+        </a>
+        
+        <div class="features">
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                30-day free trial with full access
+            </div>
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                Enterprise-grade security and compliance
+            </div>
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                Connect to 100+ business applications
+            </div>
+            <div class="feature-item">
+                <svg class="checkmark" fill="currentColor" viewBox="0 0 20 20">
+                    <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                </svg>
+                Dedicated GitBook documentation space
+            </div>
+        </div>
+        
+        <div class="trial-notice">
+            <strong>Free Trial:</strong> Get full access for 30 days. No credit card required to start.
+        </div>
+    </div>
+</body>
+</html>
